@@ -1,0 +1,67 @@
+{
+  "name": "agent-command-center",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"node server/index.js\" \"vite --host 127.0.0.1\"",
+    "server": "node server/index.js",
+    "desktop": "npm.cmd run build && electron .",
+    "bench:local": "node scripts/benchmark-local-model.mjs",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "package:folder": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-desktop.ps1",
+    "dist:win": "npm.cmd run build && electron-builder --win nsis --x64"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "concurrently": "latest",
+    "cors": "latest",
+    "dotenv": "latest",
+    "express": "latest",
+    "lucide-react": "latest",
+    "vite": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": {
+    "electron": "latest",
+    "electron-builder": "latest",
+    "png-to-ico": "latest"
+  },
+  "build": {
+    "appId": "com.tkinn.agent-command-center",
+    "productName": "Agent Command Center",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "models/**/*",
+      "scripts/**/*",
+      "server/**/*",
+      "package.json",
+      "resources/**/*"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "resources/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Agent Command Center"
+    },
+    "asarUnpack": [
+      "server/memory/**",
+      "server/acp/**"
+    ]
+  }
+}

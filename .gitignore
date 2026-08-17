@@ -1,0 +1,30 @@
+# Secrets — NEVER commit. This file holds Anthropic, NVIDIA, OpenAI, xAI,
+# Kalshi, Stripe and other live keys.
+.env
+.env.*
+!.env.example
+
+# Dependencies and build output
+node_modules/
+dist/
+release/
+*.tsbuildinfo
+
+# Local app state: threads, messages, session bindings, the memory database,
+# and run artifacts. Machine-specific, often large, and contains conversation
+# content that does not belong in version control.
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and scratch
+*.log
+.test-tmp/
+.test_tmp/
