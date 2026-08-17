@@ -23,7 +23,13 @@ import { useAgentSession } from "./useAgentSession.js";
 import { PermissionDialog, ToolCallStream, ThoughtPanel, AgentStatusBar } from "./AgentPanels.jsx";
 
 /** Anything larger than this is refused with a reason rather than silently truncated. */
-const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES = 24 * 1024 * 1024;
+/**
+ * Ceiling across all attachments on one message. Base64 inflates by ~33%, so
+ * this must stay comfortably under the server's JSON body limit (96mb) or the
+ * post fails at the transport with an error that looks like the agent broke.
+ */
+const MAX_ATTACHMENT_TOTAL = 64 * 1024 * 1024;
 
 const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp|avif|heic|svg)$/i;
 
@@ -33,17 +39,36 @@ function formatBytes(n) {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
+const MIME_EXTENSION = {
+  "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp",
+  "image/bmp": "bmp", "image/avif": "avif", "image/svg+xml": "svg",
+  "application/pdf": "pdf", "text/plain": "txt", "text/markdown": "md",
+  "text/csv": "csv", "application/json": "json"
+};
+
+/**
+ * A pasted screenshot has no filename. The server classifies by extension, so
+ * an unnamed PNG would be treated as an unknown binary — give it a real name
+ * derived from its MIME type instead.
+ */
+function nameFor(file) {
+  if (file.name && /\.[A-Za-z0-9]{1,8}$/.test(file.name)) return file.name;
+  const ext = MIME_EXTENSION[file.type] ?? "bin";
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  return file.name ? `${file.name}.${ext}` : `pasted-${stamp}.${ext}`;
+}
+
 /** Read a File into the {name, data} shape the prompt endpoint expects. */
 function readFile(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+    reader.onerror = () => reject(new Error(`Could not read ${file.name || "pasted file"}`));
     reader.onload = () => {
       // readAsDataURL gives "data:<mime>;base64,<payload>" — the server wants
       // only the payload.
       const comma = String(reader.result).indexOf(",");
       resolve({
-        name: file.name || "pasted-file",
+        name: nameFor(file),
         size: file.size,
         data: String(reader.result).slice(comma + 1)
       });
@@ -332,12 +357,12 @@ export default function App() {
   const session = useAgentSession(activeThreadId);
 
   const addFiles = useCallback(async (fileList) => {
-    const incoming = Array.from(fileList ?? []);
+    const incoming = Array.from(fileList ?? []).filter(Boolean);
     if (!incoming.length) return;
     const accepted = [];
     for (const file of incoming) {
       if (file.size > MAX_ATTACHMENT_BYTES) {
-        setError(`${file.name} is ${formatBytes(file.size)} — the limit is ${formatBytes(MAX_ATTACHMENT_BYTES)}.`);
+        setError(`${file.name} is ${formatBytes(file.size)} — the limit is ${formatBytes(MAX_ATTACHMENT_BYTES)} per file.`);
         continue;
       }
       try {
@@ -347,7 +372,22 @@ export default function App() {
         setError(e.message);
       }
     }
-    if (accepted.length) setAttachments((prev) => [...prev, ...accepted]);
+    if (!accepted.length) return;
+    setAttachments((prev) => {
+      // Enforce the total here rather than in the loop: the running total has to
+      // include what is already attached, not just this batch.
+      const merged = [...prev];
+      let total = prev.reduce((sum, a) => sum + (a.size ?? 0), 0);
+      for (const file of accepted) {
+        if (total + file.size > MAX_ATTACHMENT_TOTAL) {
+          setError(`Attachments would exceed ${formatBytes(MAX_ATTACHMENT_TOTAL)} in one message. ${file.name} was not attached.`);
+          continue;
+        }
+        total += file.size;
+        merged.push(file);
+      }
+      return merged;
+    });
   }, []);
 
   const removeAttachment = useCallback((id) => {
@@ -567,9 +607,20 @@ export default function App() {
               if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
             }}
             onPaste={(e) => {
-              // Screenshots arrive on the clipboard as files with no name.
-              const files = Array.from(e.clipboardData?.files ?? []);
-              if (!files.length) return;
+              const data = e.clipboardData;
+              if (!data) return;
+              // Two paths, because they are not equivalent: copying a file in
+              // Explorer populates `files`, while a screenshot tool often only
+              // exposes `items` with kind "file". Reading one alone silently
+              // drops the other.
+              let files = Array.from(data.files ?? []);
+              if (!files.length) {
+                files = Array.from(data.items ?? [])
+                  .filter((item) => item.kind === "file")
+                  .map((item) => item.getAsFile())
+                  .filter(Boolean);
+              }
+              if (!files.length) return;   // plain text paste — leave it alone
               e.preventDefault();
               addFiles(files);
             }}

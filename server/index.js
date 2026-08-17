@@ -33,7 +33,10 @@ app.post("/stripe/webhook", express.raw({ type: "application/json" }), async (re
   }
 });
 
-app.use(express.json({ limit: "8mb" }));
+// Attachments travel as base64 inside the prompt body, which inflates bytes by
+// ~33%. This ceiling must stay above MAX_ATTACHMENT_TOTAL in the renderer or
+// large attachments fail here with a 413 that reads like an agent error.
+app.use(express.json({ limit: "96mb" }));
 
 // Match Electron, which tolerates a malformed body rather than returning
 // Express's default HTML error page.

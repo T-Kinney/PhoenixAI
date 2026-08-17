@@ -54,6 +54,9 @@ const AUDIO_MIME = {
 
 export function classify(name) {
   const ext = path.extname(name || "").toLowerCase();
+  // SVG is markup. A coding agent can read and edit it as source, which is more
+  // useful than a picture it may not even accept, so it takes the text path.
+  if (ext === ".svg") return { kind: "text", mimeType: "image/svg+xml", ext };
   if (IMAGE_MIME[ext]) return { kind: "image", mimeType: IMAGE_MIME[ext], ext };
   if (AUDIO_MIME[ext]) return { kind: "audio", mimeType: AUDIO_MIME[ext], ext };
   if (ext === ".pdf") return { kind: "pdf", mimeType: "application/pdf", ext };
