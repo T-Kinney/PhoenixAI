@@ -71,7 +71,7 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "REPLACE_ME",
+        "owner": "T-Kinney",
         "repo": "PhoenixAI",
         "releaseType": "release"
       }
