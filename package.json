@@ -13,18 +13,22 @@
     "preview": "vite preview --host 127.0.0.1",
     "package:folder": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-desktop.ps1",
     "dist:win": "npm.cmd run icon && npm.cmd run build && electron-builder --win nsis --x64",
-    "icon": "node scripts/make-icon.mjs"
+    "icon": "node scripts/make-icon.mjs",
+    "release": "npm.cmd run icon && npm.cmd run build && electron-builder --win nsis --x64 --publish always",
+    "release:dry": "npm.cmd run icon && npm.cmd run build && electron-builder --win nsis --x64 --publish never"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
     "concurrently": "latest",
     "cors": "latest",
     "dotenv": "latest",
+    "electron-log": "^5.4.4",
+    "electron-updater": "^6.8.9",
     "express": "latest",
     "lucide-react": "latest",
-    "vite": "latest",
     "react": "latest",
-    "react-dom": "latest"
+    "react-dom": "latest",
+    "vite": "latest"
   },
   "devDependencies": {
     "electron": "latest",
@@ -63,6 +67,14 @@
     "asarUnpack": [
       "server/memory/**",
       "server/acp/**"
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "REPLACE_ME",
+        "repo": "PhoenixAI",
+        "releaseType": "release"
+      }
     ]
   }
 }

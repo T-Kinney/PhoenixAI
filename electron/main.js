@@ -1,8 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from "electron";
-import { spawn } from "node:child_process";
+import { startAutoUpdate } from "./updater.js";
 import fs from "node:fs/promises";
-import http from "node:http";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -12,21 +10,8 @@ const distDir = path.join(appRoot, "dist");
 const resourcesDir = path.join(appRoot, "resources");
 const iconPath = path.join(resourcesDir, "icon.png");
 let api;
-let stripeServer;
-let stripeCliProcess;
 let quitting = false;
 
-const stripeListener = {
-  enabled: false,
-  running: false,
-  pid: null,
-  command: null,
-  startedAt: null,
-  stoppedAt: null,
-  lastOutput: null,
-  error: null,
-  webhookSecretCaptured: false
-};
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -72,6 +57,10 @@ let routes = null;
 let sessions = null;
 let buildRoutes = null;
 let matchRoute = null;
+let updater = null;
+// The last update state, replayed to windows that open after it was emitted so
+// a late-opening window still shows "restart to update".
+let lastUpdateState = null;
 
 /** Push an agent event to every open window. */
 function broadcast(channel, payload) {
@@ -120,152 +109,6 @@ async function handleApi(request, pathname) {
   } catch (error) {
     return jsonResponse({ error: error.message }, error.status || 502);
   }
-}
-
-function readNodeRequestBody(request) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    request.on("data", (chunk) => chunks.push(chunk));
-    request.on("end", () => resolve(Buffer.concat(chunks)));
-    request.on("error", reject);
-  });
-}
-
-function sendNodeJson(response, data, status = 200) {
-  const body = JSON.stringify(data);
-  response.writeHead(status, {
-    "content-type": "application/json",
-    "content-length": Buffer.byteLength(body),
-    "access-control-allow-origin": "http://127.0.0.1"
-  });
-  response.end(body);
-}
-
-function stripeStatus() {
-  return {
-    ...api.getStripeStatus(),
-    listener: { ...stripeListener }
-  };
-}
-
-async function fileExists(filePath) {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function resolveStripeCommand() {
-  if (process.env.STRIPE_CLI_PATH && await fileExists(process.env.STRIPE_CLI_PATH)) {
-    return process.env.STRIPE_CLI_PATH;
-  }
-
-  const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
-  const userInstall = path.join(appData, "npm", "stripe.cmd");
-  if (await fileExists(userInstall)) {
-    return userInstall;
-  }
-
-  return process.platform === "win32" ? "stripe.cmd" : "stripe";
-}
-
-function noteStripeOutput(text) {
-  const clean = String(text || "").replace(/\u001b\[[0-9;]*m/g, "").trim();
-  if (!clean) return;
-
-  const secret = clean.match(/whsec_[A-Za-z0-9_]+/);
-  if (secret?.[0]) {
-    process.env.STRIPE_WEBHOOK_SECRET = secret[0];
-    stripeListener.webhookSecretCaptured = true;
-    stripeListener.error = null;
-  }
-  const redacted = clean.replace(/whsec_[A-Za-z0-9_]+/g, "whsec_[redacted]");
-  stripeListener.lastOutput = redacted.split(/\r?\n/).filter(Boolean).slice(-2).join(" ");
-  if (/ready/i.test(clean)) {
-    stripeListener.running = true;
-    stripeListener.error = null;
-  }
-  if (/login|auth|error|failed/i.test(clean)) {
-    stripeListener.error = stripeListener.lastOutput;
-  }
-}
-
-async function startStripeCliListener() {
-  if (process.env.AGENTCC_STRIPE_LISTENER === "off") {
-    stripeListener.enabled = false;
-    stripeListener.error = "Auto listener disabled by AGENTCC_STRIPE_LISTENER=off.";
-    return;
-  }
-
-  const status = api.getStripeStatus();
-  if (!status.secretConfigured && !status.publishableConfigured) {
-    stripeListener.enabled = false;
-    stripeListener.error = "Stripe keys are not configured.";
-    return;
-  }
-
-  const command = await resolveStripeCommand();
-  const args = ["listen", "--forward-to", status.webhookUrl];
-  stripeListener.enabled = true;
-  stripeListener.running = false;
-  stripeListener.command = `${command} ${args.join(" ")}`;
-  stripeListener.startedAt = new Date().toISOString();
-  stripeListener.stoppedAt = null;
-  stripeListener.error = null;
-
-  stripeCliProcess = spawn(command, args, {
-    shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(command),
-    windowsHide: true,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: process.env
-  });
-
-  stripeListener.pid = stripeCliProcess.pid || null;
-  stripeCliProcess.stdout?.on("data", (chunk) => noteStripeOutput(chunk.toString("utf8")));
-  stripeCliProcess.stderr?.on("data", (chunk) => noteStripeOutput(chunk.toString("utf8")));
-  stripeCliProcess.on("error", (error) => {
-    stripeListener.running = false;
-    stripeListener.error = error.message;
-  });
-  stripeCliProcess.on("exit", (code, signal) => {
-    stripeListener.running = false;
-    stripeListener.pid = null;
-    stripeListener.stoppedAt = new Date().toISOString();
-    if (!quitting && code !== 0) {
-      stripeListener.error = `Stripe listener exited with ${signal || `code ${code}`}.`;
-    }
-  });
-}
-
-function startStripeWebhookServer() {
-  const status = api.getStripeStatus();
-  const server = http.createServer(async (request, response) => {
-    const url = new URL(request.url, `http://${request.headers.host || "127.0.0.1"}`);
-
-    if (request.method === "GET" && url.pathname === "/stripe/status") {
-      sendNodeJson(response, stripeStatus());
-      return;
-    }
-
-    if (request.method === "POST" && url.pathname === "/stripe/webhook") {
-      try {
-        const body = await readNodeRequestBody(request);
-        const result = await api.handleStripeWebhook(body, request.headers["stripe-signature"]);
-        sendNodeJson(response, result);
-      } catch (error) {
-        sendNodeJson(response, { error: error.message }, 400);
-      }
-      return;
-    }
-
-    sendNodeJson(response, { error: "Not found" }, 404);
-  });
-
-  server.on("error", () => {});
-  server.listen(status.webhookPort, "127.0.0.1");
-  return server;
 }
 
 async function handleAppProtocol(request) {
@@ -378,13 +221,22 @@ app.whenReady().then(() => {
   // auto-deny, with the user never seeing a dialog.
   ipcMain.handle("agent:pending-permissions", () => sessions.pendingPermissions());
 
+  // Updates. Packaged builds only — in dev there is no published feed, and
+  // checking would just log errors on every launch.
+  updater = startAutoUpdate({
+    enabled: app.isPackaged,
+    broadcast: (channel, payload) => {
+      lastUpdateState = payload;
+      broadcast(channel, payload);
+    }
+  });
+  ipcMain.handle("update:state", () => lastUpdateState);
+  ipcMain.handle("update:check", () => { updater.check(); });
+  ipcMain.handle("update:install", () => { updater.quitAndInstall(); });
+
   routes = buildRoutes({ selectFolder, sessions });
 
   protocol.handle("phoenix", handleAppProtocol);
-  stripeServer = startStripeWebhookServer();
-  startStripeCliListener().catch((error) => {
-    stripeListener.error = error.message;
-  });
   createWindow();
 
   app.on("activate", () => {
@@ -409,8 +261,6 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   shuttingDown = true;
   quitting = true;
-  stripeCliProcess?.kill();
-  stripeServer?.close();
   Promise.resolve(sessions?.shutdown())
     .catch(() => {})
     .finally(() => app.quit());

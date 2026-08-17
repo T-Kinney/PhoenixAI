@@ -16,11 +16,58 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Bot, ChevronDown, FolderOpen, Loader2, Plus, Send, Settings,
+  Bot, ChevronDown, Download, FolderOpen, Loader2, Plus, Send, Settings,
   Square, Terminal, Workflow, X, Zap
 } from "lucide-react";
 import { useAgentSession } from "./useAgentSession.js";
 import { PermissionDialog, ToolCallStream, ThoughtPanel, AgentStatusBar } from "./AgentPanels.jsx";
+
+/**
+ * Update notice.
+ *
+ * Deliberately silent for "checking", "current" and "error": a failed update
+ * check is not the user's problem and an unreachable feed must not put a red
+ * bar above their work. Only a download in progress or an update ready to
+ * apply is worth a line.
+ */
+function UpdateBanner() {
+  const [state, setState] = useState(null);
+
+  useEffect(() => {
+    const bridge = window.agentBridge;
+    if (!bridge?.onUpdate) return undefined;
+    // Replay first: a "ready" emitted before this window mounted would
+    // otherwise leave a downloaded update with nothing to prompt the restart.
+    bridge.updateState?.().then((s) => { if (s) setState(s); }).catch(() => {});
+    return bridge.onUpdate(setState);
+  }, []);
+
+  if (state?.state === "downloading") {
+    return (
+      <div className="banner bannerUpdate">
+        <Loader2 size={13} className="spin" />
+        Downloading update {state.version ? `${state.version} ` : ""}— {state.percent ?? 0}%
+      </div>
+    );
+  }
+
+  if (state?.state === "ready") {
+    return (
+      <div className="banner bannerUpdate">
+        <Download size={13} />
+        <span>Update {state.version ?? ""} is ready.</span>
+        <button
+          className="bannerAction"
+          onClick={() => window.agentBridge?.installUpdate?.()}
+        >
+          Restart and install
+        </button>
+      </div>
+    );
+  }
+
+  return null;
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -319,7 +366,13 @@ export default function App() {
         workspace={workspace}
         activeThreadId={activeThreadId}
         activeProjectId={project?.id ?? null}
-        onSelectProject={setActiveProjectId}
+        onSelectProject={(id) => {
+          setActiveProjectId(id);
+          // A thread belongs to one folder. Switching projects while a foreign
+          // thread is open would leave the chat filed under the old project
+          // while the agent worked in the new one, so close it instead.
+          if (bundle?.thread && bundle.thread.projectId !== id) setActiveThreadId(null);
+        }}
         onSelectThread={setActiveThreadId}
         onNewThread={newThread}
         onChooseFolder={async () => {
@@ -343,6 +396,8 @@ export default function App() {
             </button>
           </div>
         </header>
+
+        <UpdateBanner />
 
         {error && <div className="banner bannerError" onClick={() => setError(null)}>{error}</div>}
 

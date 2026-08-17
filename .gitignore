@@ -28,3 +28,8 @@ Thumbs.db
 *.log
 .test-tmp/
 .test_tmp/
+
+# Prompts describing private projects. These name the internal modules and
+# strategy structure of the ATLAS trading system; the repo is public, so they
+# stay local. The file remains on disk — it is only untracked.
+prompts/

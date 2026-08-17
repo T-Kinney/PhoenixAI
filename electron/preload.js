@@ -75,5 +75,20 @@ contextBridge.exposeInMainWorld("agentBridge", {
    * raised while no window was open must be re-shown on open — otherwise it
    * stalls for its full timeout and auto-denies with nothing displayed.
    */
-  pendingPermissions: () => ipcRenderer.invoke("agent:pending-permissions")
+  pendingPermissions: () => ipcRenderer.invoke("agent:pending-permissions"),
+
+  /** Update lifecycle: checking -> available -> downloading -> ready. */
+  onUpdate: subscribe("update:state"),
+
+  /**
+   * The current update state. A "ready" event fired before this window opened
+   * would otherwise be lost, leaving a downloaded update with nothing to
+   * prompt the restart.
+   */
+  updateState: () => ipcRenderer.invoke("update:state"),
+
+  checkForUpdate: () => ipcRenderer.invoke("update:check"),
+
+  /** Quit and apply a downloaded update, then relaunch. */
+  installUpdate: () => ipcRenderer.invoke("update:install")
 });
