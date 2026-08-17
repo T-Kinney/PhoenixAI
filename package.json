@@ -1,5 +1,5 @@
 {
-  "name": "agent-command-center",
+  "name": "phoenixai",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -12,7 +12,8 @@
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
     "package:folder": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-desktop.ps1",
-    "dist:win": "npm.cmd run build && electron-builder --win nsis --x64"
+    "dist:win": "npm.cmd run icon && npm.cmd run build && electron-builder --win nsis --x64",
+    "icon": "node scripts/make-icon.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
@@ -31,8 +32,8 @@
     "png-to-ico": "latest"
   },
   "build": {
-    "appId": "com.tkinn.agent-command-center",
-    "productName": "Agent Command Center",
+    "appId": "com.rykerphoenix.phoenixai",
+    "productName": "PhoenixAI",
     "directories": {
       "output": "release"
     },
@@ -57,7 +58,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Agent Command Center"
+      "shortcutName": "PhoenixAI"
     },
     "asarUnpack": [
       "server/memory/**",

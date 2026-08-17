@@ -30,7 +30,7 @@ const stripeListener = {
 
 protocol.registerSchemesAsPrivileged([
   {
-    scheme: "agentcc",
+    scheme: "phoenix",
     privileges: {
       standard: true,
       secure: true,
@@ -301,7 +301,7 @@ function createWindow() {
     height: 920,
     minWidth: 1040,
     minHeight: 720,
-    title: "Agent Command Center",
+    title: "PhoenixAI",
     icon: iconPath,
     backgroundColor: "#f3f1ec",
     autoHideMenuBar: true,
@@ -319,12 +319,12 @@ function createWindow() {
     shell.openExternal(url);
     return { action: "deny" };
   });
-  window.loadURL("agentcc://app/");
+  window.loadURL("phoenix://app/");
   return window;
 }
 
-app.setName("Agent Command Center");
-app.setAppUserModelId("com.tkinn.agent-command-center");
+app.setName("PhoenixAI");
+app.setAppUserModelId("com.rykerphoenix.phoenixai");
 
 app.whenReady().then(() => {
   process.env.AGENTCC_DATA_DIR = path.join(app.getPath("userData"), "data");
@@ -380,7 +380,7 @@ app.whenReady().then(() => {
 
   routes = buildRoutes({ selectFolder, sessions });
 
-  protocol.handle("agentcc", handleAppProtocol);
+  protocol.handle("phoenix", handleAppProtocol);
   stripeServer = startStripeWebhookServer();
   startStripeCliListener().catch((error) => {
     stripeListener.error = error.message;

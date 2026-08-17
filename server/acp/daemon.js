@@ -24,6 +24,53 @@ const OUTPUT_TAIL_CHARS = 8000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Check whether the installed Grok Build is behind, and update it.
+ *
+ * xAI publishes no tags, no GitHub releases and no machine-readable changelog,
+ * so the only reliable signal is npm: `@xai-official/grok` tracks the CLI
+ * version. The installer is idempotent, so re-running it is the update path.
+ *
+ * Never runs automatically at startup — an unexpected binary swap mid-session
+ * is worse than being a version behind. The app surfaces the availability and
+ * the user decides.
+ */
+export async function checkGrokVersion(bin = DEFAULT_GROK_BIN) {
+  const local = await new Promise((resolve) => {
+    const proc = spawn(bin, ["--version"], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+    let out = "";
+    proc.stdout.setEncoding("utf8");
+    proc.stdout.on("data", (t) => { out += t; });
+    proc.on("error", () => resolve(null));
+    proc.on("close", () => resolve(out.match(/(\d+\.\d+\.\d+)/)?.[1] ?? null));
+    setTimeout(() => { proc.kill(); resolve(null); }, 10_000).unref?.();
+  });
+
+  let latest = null;
+  try {
+    const response = await fetch("https://registry.npmjs.org/@xai-official/grok/latest", {
+      signal: AbortSignal.timeout(15_000)
+    });
+    if (response.ok) latest = (await response.json())?.version ?? null;
+  } catch { /* offline; report what we know */ }
+
+  const cmp = (a, b) => {
+    const pa = String(a).split(".").map(Number), pb = String(b).split(".").map(Number);
+    for (let i = 0; i < 3; i++) if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
+    return 0;
+  };
+
+  return {
+    installed: local,
+    latest,
+    updateAvailable: Boolean(local && latest && cmp(local, latest) < 0),
+    // The official installer is the supported update path and is idempotent.
+    command: process.platform === "win32"
+      ? "irm https://x.ai/cli/install.ps1 | iex"
+      : "curl -fsSL https://x.ai/cli/install.sh | bash"
+  };
+}
+
 /** Ask the OS for a free port by binding to 0 and reading it back. */
 function findFreePort() {
   return new Promise((resolve, reject) => {

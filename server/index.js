@@ -122,7 +122,7 @@ app.use((req, res) => {
 
 const port = Number(process.env.ACC_PORT || 5455);
 const server = app.listen(port, "127.0.0.1", () => {
-  console.log(`Agent Command Center API listening on http://127.0.0.1:${port}`);
+  console.log(`PhoenixAI API listening on http://127.0.0.1:${port}`);
   console.log(`${routes.length} routes mounted from server/routes.js`);
 });
 

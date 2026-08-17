@@ -18,6 +18,7 @@
 import * as api from "./api.js";
 import { HarnessRegistry } from "./acp/harnesses.js";
 import { workflowCommand } from "./acp/workflows.js";
+import { checkGrokVersion } from "./acp/daemon.js";
 
 // One shared registry: the catalogue is identical for every caller and the
 // fetch is cached with an offline fallback.
@@ -169,6 +170,11 @@ export function buildRoutes(deps = {}) {
         async ({ body }) => sessions.submitAuthCode(body.code)],
       ["POST", "/api/agent/auth/cancel", async () => sessions.cancelLogin()],
       ["POST", "/api/agent/auth/logout", async () => sessions.logout()],
+
+      // --- agent version ---
+      // Surfaced rather than auto-applied: swapping the agent binary mid-session
+      // is worse than running a version behind.
+      ["GET", "/api/agent/version", async () => checkGrokVersion()],
 
       // --- workflows ---
       // Workflows have no RPC: every control is slash text sent as a prompt.

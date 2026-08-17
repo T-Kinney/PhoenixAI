@@ -1,5 +1,5 @@
 /**
- * Agent Command Center — desktop shell.
+ * PhoenixAI — desktop shell.
  *
  * Deliberately one surface, not six tabs. The previous UI exposed Objectives,
  * Agent Roles, a Stack Toolchain and an Agent Council, none of which were
@@ -117,7 +117,7 @@ function Sidebar({ workspace, activeThreadId, onSelectThread, onNewThread, onCho
     <aside className="sidebar">
       <div className="sidebarHead">
         <div>
-          <div className="sidebarTitle">Command Center</div>
+          <div className="sidebarTitle">PhoenixAI</div>
           <div className="sidebarSub">Local agent workspace</div>
         </div>
         <button className="iconBtn" onClick={onNewThread} title="New chat">
@@ -318,7 +318,7 @@ export default function App() {
 
       <main className="main">
         <header className="topbar">
-          <div className="topbarTitle">{bundle?.thread?.title ?? "Agent Command Center"}</div>
+          <div className="topbarTitle">{bundle?.thread?.title ?? "PhoenixAI"}</div>
           <div className="topbarRight">
             <AgentStatusBar
               connection={session.connection}
