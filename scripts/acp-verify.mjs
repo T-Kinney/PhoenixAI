@@ -223,6 +223,56 @@ async function testDaemonSecretNotInArgv() {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * End-to-end memory test: inject the memory MCP server, seed it with a retired
+ * approach, then ask the agent to do that exact thing. It must refuse.
+ *
+ * Detection note: Grok surfaces MCP calls as `use_tool`, NOT under the tool's
+ * own name, so matching /memory/ against tool titles gives a false negative.
+ * The verdict comes from the reply content instead.
+ */
+async function testMemoryStopsRework() {
+  const { MemoryStore } = await import("../server/memory/store.js");
+  const { SessionManager } = await import("../server/acp/sessionManager.js");
+
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "acp-mem-"));
+  const db = path.join(dir, "memory.db");
+  const store = new MemoryStore(db).open();
+  store.addMemory({
+    project: dir, kind: "failure", subject: "fee gates",
+    text: "[DEAD - never resurrect] fee>=75% entry gates. Fee is a conviction booster, never a gate."
+  });
+  store.close();
+
+  const sm = new SessionManager({
+    statePath: path.join(dir, "s.json"), defaultCwd: dir, memoryDbPath: db, idleReleaseMs: 0
+  });
+  sm.on("permission", (req) => sm.respondToPermission(req.id, "allow-once"));
+
+  let text = "";
+  sm.on("update", ({ update }) => {
+    if (update?.sessionUpdate === "agent_message_chunk") text += update.content?.text ?? "";
+  });
+
+  try {
+    await sm.connect();
+    const servers = sm.mcpServersFor(dir).map((x) => x.name);
+    check("memory server injected at session/new", servers.includes("project-memory"), servers.join(","));
+
+    await sm.startPrompt("t1",
+      "I want to add a fee>=75% entry gate on this project. Check project memory first, then tell me what you found.",
+      { projectPath: dir });
+    await new Promise((r) => {
+      sm.on("turn-complete", r); sm.on("turn-error", r); setTimeout(r, 240_000);
+    });
+
+    const refused = /dead|retired|already tried|never resurrect|would not/i.test(text);
+    check("agent refuses retired approach", refused, text.trim().slice(0, 90));
+  } finally {
+    await sm.shutdown();
+  }
+}
+
 async function main() {
   console.log("\n=== ACP VERIFICATION SUITE ===\n");
   const tests = [
@@ -231,7 +281,8 @@ async function main() {
     ["permission deny", testPermissionDeny],
     ["permission allow (object form)", testPermissionAllowViaObject],
     ["daemon secret hygiene", testDaemonSecretNotInArgv],
-    ["mid-turn disconnect", testMidTurnDisconnectSurvival]
+    ["mid-turn disconnect", testMidTurnDisconnectSurvival],
+    ["memory stops rework", testMemoryStopsRework]
   ];
 
   // Optional substring filter so a single test can be re-run in isolation:

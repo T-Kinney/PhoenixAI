@@ -365,6 +365,12 @@ export class SessionManager extends EventEmitter {
       payload: { id, ...request, options }
     });
 
+    // If no host is listening, decline cleanly rather than letting the agent
+    // block for the full TTL waiting on an approval nobody can give.
+    if (this.listenerCount("permission") === 0) {
+      settle(null);
+      return;
+    }
     this.emit("permission", { id, ...request, options });
   }
 
