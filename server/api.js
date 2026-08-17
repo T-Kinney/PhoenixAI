@@ -391,10 +391,17 @@ function defaultProjectPath() {
     return path.resolve(process.env.AGENTCC_DEFAULT_PROJECT);
   }
 
-  const releaseMarker = `${path.sep}release${path.sep}`;
-  if (rootDir.includes(releaseMarker)) {
-    return path.resolve(rootDir, "..", "..", "..", "..");
+  // In a PACKAGED build, rootDir points inside the app bundle (the
+  // resources/app.asar directory). Seeding that as a project produced a
+  // phantom "app.asar" entry pointing at Program Files - not a folder anyone
+  // wants an agent editing. Packaged builds start with no project instead;
+  // the user adds their own.
+  if (rootDir.includes(`${path.sep}app.asar`) || rootDir.includes(`${path.sep}resources${path.sep}app`)) {
+    return null;
   }
+
+  const releaseMarker = `${path.sep}release${path.sep}`;
+  if (rootDir.includes(releaseMarker)) return null;
 
   return rootDir;
 }
@@ -409,12 +416,14 @@ function nowIso() {
 
 function defaultProject() {
   const projectPath = defaultProjectPath();
+  // No sensible default in a packaged build — return nothing rather than
+  // inventing a project inside the installation directory.
+  if (!projectPath) return null;
   return {
     id: "project_desktop_client",
-    name: stableProjectName(projectPath),
+    name: path.basename(projectPath),
     path: projectPath,
-    addedAt: nowIso(),
-    lastOpenedAt: nowIso()
+    createdAt: nowIso()
   };
 }
 
@@ -460,7 +469,7 @@ async function ensureDataFiles() {
   try {
     await fs.access(projectsPath);
   } catch {
-    await fs.writeFile(projectsPath, JSON.stringify([defaultProject()], null, 2));
+    await fs.writeFile(projectsPath, JSON.stringify([defaultProject()].filter(Boolean), null, 2));
   }
   try {
     await fs.access(threadsPath);
@@ -566,7 +575,7 @@ function messagesPath(threadId) {
 }
 
 async function readProjects() {
-  const projects = await readJsonFile(projectsPath, [defaultProject()]);
+  const projects = await readJsonFile(projectsPath, [defaultProject()].filter(Boolean));
   const fallback = defaultProjectPath();
   return projects.map((project) => {
     const normalized = String(project.path || "");

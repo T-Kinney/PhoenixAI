@@ -331,3 +331,22 @@ button { font: inherit; color: inherit; cursor: pointer; }
   .shell { grid-template-columns: 234px 1fr; }
   .inspector { display: none; }
 }
+
+/* The agent edits real files, so which folder it is pointed at is the single
+   most consequential setting in the app and must never require guessing. */
+.projectRow {
+  display: flex; gap: .45rem; align-items: flex-start; width: 100%;
+  padding: .35rem .4rem; color: var(--ink-soft); text-align: left;
+  background: none; border: 1px solid transparent; border-radius: 7px;
+}
+.projectRow:hover { background: var(--surface); }
+.projectRowActive { background: var(--surface); border-color: var(--accent); }
+.projectRowActive .projectName { color: var(--accent); }
+
+.workingIn {
+  display: inline-flex; align-items: center; gap: .3rem;
+  font-size: .75rem; color: var(--ink-faint);
+  background: var(--surface-2); border-radius: 6px; padding: .25rem .5rem;
+  max-width: 15rem; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.workingInNone { color: var(--danger); }

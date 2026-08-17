@@ -99,7 +99,8 @@ function AgentPicker({ value, onChange, harnesses, busy }) {
 
 /* ------------------------------------------------------------------ */
 
-function Sidebar({ workspace, activeThreadId, onSelectThread, onNewThread, onChooseFolder }) {
+function Sidebar({ workspace, activeThreadId, activeProjectId, onSelectProject,
+                  onSelectThread, onNewThread, onChooseFolder }) {
   const projects = workspace?.projects ?? [];
   const threads = workspace?.threads ?? [];
 
@@ -128,13 +129,17 @@ function Sidebar({ workspace, activeThreadId, onSelectThread, onNewThread, onCho
       <div className="sidebarScroll">
         {projects.map((project) => (
           <div key={project.id} className="projectBlock">
-            <div className="projectRow">
+            <button
+              className={cx("projectRow", project.id === activeProjectId && "projectRowActive")}
+              onClick={() => onSelectProject(project.id)}
+              title={`Work in ${project.path}`}
+            >
               <FolderOpen size={14} />
               <div className="projectMeta">
                 <div className="projectName">{project.name}</div>
                 <div className="projectPath">{project.path}</div>
               </div>
-            </div>
+            </button>
             <div className="threadList">
               {(byProject.get(project.id) ?? []).map((thread) => (
                 <button
@@ -225,8 +230,13 @@ export default function App() {
   const [workflowRuns, setWorkflowRuns] = useState([]);
   const scrollRef = useRef(null);
 
+  const [activeProjectId, setActiveProjectId] = useState(null);
   const session = useAgentSession(activeThreadId);
-  const project = workspace?.projects?.find((p) => p.id === bundle?.thread?.projectId)
+
+  // The agent's working directory. Explicit selection wins; otherwise follow
+  // the open thread; otherwise the first project.
+  const project = workspace?.projects?.find((p) => p.id === activeProjectId)
+    ?? workspace?.projects?.find((p) => p.id === bundle?.thread?.projectId)
     ?? workspace?.projects?.[0];
 
   useEffect(() => {
@@ -308,6 +318,8 @@ export default function App() {
       <Sidebar
         workspace={workspace}
         activeThreadId={activeThreadId}
+        activeProjectId={project?.id ?? null}
+        onSelectProject={setActiveProjectId}
         onSelectThread={setActiveThreadId}
         onNewThread={newThread}
         onChooseFolder={async () => {
@@ -340,8 +352,10 @@ export default function App() {
               <Bot size={26} />
               <h2>Start building</h2>
               <p>
-                Point at a project folder and describe what you want. The agent reads and
-                edits files directly, and asks before it writes.
+                {project
+                  ? <>Working in <code>{project.path}</code>. Describe what you want —
+                     the agent reads and edits files there, and asks before it writes.</>
+                  : <>Add a project folder on the left, then describe what you want.</>}
               </p>
             </div>
           )}
@@ -388,6 +402,13 @@ export default function App() {
           />
           <div className="composerBar">
             <AgentPicker value={agent} onChange={setAgent} harnesses={harnesses} busy={session.busy} />
+            {project ? (
+              <span className="workingIn" title={project.path}>
+                <FolderOpen size={12} /> {project.name}
+              </span>
+            ) : (
+              <span className="workingIn workingInNone">No project selected</span>
+            )}
             <div className="composerSpacer" />
             {session.busy ? (
               <button className="sendBtn sendBtnStop" onClick={session.cancel}>
