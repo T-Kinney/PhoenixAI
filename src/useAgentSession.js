@@ -136,6 +136,9 @@ export function useAgentSession(threadId) {
   const [commands, setCommands] = useState([]);
   // Context usage, so the window limit is visible before it is hit.
   const [usage, setUsage] = useState(null);
+  // Memories the agent pulled in via the MCP tool, so the user can see WHY it
+  // answered the way it did rather than the recall being invisible.
+  const [memoryHits, setMemoryHits] = useState([]);
 
   // Replay arrives as a burst that rebuilds history; buffer it so the UI does
   // not thrash through hundreds of intermediate renders.
@@ -372,6 +375,7 @@ export function useAgentSession(threadId) {
     setError(null);
     setBusy(false);
     setQueue([]);
+    setMemoryHits([]);
   }, [threadId]);
 
   return useMemo(() => ({
@@ -384,11 +388,14 @@ export function useAgentSession(threadId) {
     send,
     cancel,
     queue,
+    memoryHits,
+    usage,
+    commands,
     enqueue,
     dequeue,
     editQueued,
     // Usable in the desktop app via IPC, and in the dev browser via SSE.
     available: transportReady
   }), [state, permission, answerPermission, connection, busy, error, send, cancel,
-       transportReady, queue, enqueue, dequeue, editQueued]);
+       transportReady, queue, enqueue, dequeue, editQueued, memoryHits, usage, commands]);
 }

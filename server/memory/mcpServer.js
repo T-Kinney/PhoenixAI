@@ -29,7 +29,7 @@ import { parsePlaybook, renderPlaybook } from "./playbook.js";
 import fs from "node:fs";
 import readline from "node:readline";
 
-const PROTOCOL_VERSION = "2025-06-18";
+const PROTOCOL_VERSION = "2025-11-25";
 const SERVER_INFO = { name: "agent-command-center-memory", version: "1.0.0" };
 
 function arg(name, fallback = null) {
@@ -243,7 +243,9 @@ async function handle(message) {
       return isRequest && send({
         jsonrpc: "2.0", id,
         result: {
-          protocolVersion: params.protocolVersion ?? PROTOCOL_VERSION,
+          // Answer with the version WE support, not an echo of the client's.
+          // Echoing back claims support for whatever it asked for.
+          protocolVersion: PROTOCOL_VERSION,
           capabilities: { tools: {} },
           serverInfo: SERVER_INFO
         }

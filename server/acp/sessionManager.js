@@ -82,6 +82,9 @@ export class SessionManager extends EventEmitter {
     memoryDbPath = null,
     playbookPath = null,
     idleReleaseMs = IDLE_RELEASE_MS,
+    // grok-build 1.0.5+ accepts a reasoning-effort hint at session start.
+    // Explicit here beats the model catalog default.
+    reasoningEffort = null,
     // Extra MCP servers, same shape as the ACP `mcpServers` entries.
     extraMcpServers = []
   } = {}) {
@@ -91,6 +94,7 @@ export class SessionManager extends EventEmitter {
     this.memoryDbPath = memoryDbPath;
     this.playbookPath = playbookPath;
     this.idleReleaseMs = idleReleaseMs;
+    this.reasoningEffort = reasoningEffort;
     this.extraMcpServers = extraMcpServers;
   }
 
@@ -167,6 +171,24 @@ export class SessionManager extends EventEmitter {
     await this.#daemon?.stop().catch(() => {});
     this.emit("released", { reason: "idle" });
     return { released: true };
+  }
+
+  /**
+   * `_meta` for session creation.
+   *
+   * Only the first parseable `startupHints` object is honored — the agent takes
+   * it whole rather than merging field by field, so it must be complete.
+   */
+  #sessionMeta() {
+    const meta = {
+      startupHints: {
+        // A GUI has no TTY; saying so stops the agent waiting on terminal-only
+        // affordances.
+        nonInteractive: true
+      }
+    };
+    if (this.reasoningEffort) meta.reasoningEffort = this.reasoningEffort;
+    return meta;
   }
 
   /** Auth plane in use, so the UI can state it rather than leave it inferred. */
@@ -549,7 +571,8 @@ export class SessionManager extends EventEmitter {
 
     const sessionId = await this.#client.newSession({
       cwd,
-      mcpServers: this.mcpServersFor(projectPath ?? null)
+      mcpServers: this.mcpServersFor(projectPath ?? null),
+      meta: this.#sessionMeta()
     });
     this.#bindings.set(threadId, { sessionId, cwd });
     this.#attached.add(sessionId);
