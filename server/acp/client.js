@@ -255,12 +255,28 @@ export class GrokAcpClient extends EventEmitter {
     return this.request("session/load", { sessionId, cwd, mcpServers });
   }
 
-  /** Send a prompt; resolves when the turn ends. Content streams via "update". */
-  async prompt(sessionId, text) {
-    return this.request("session/prompt", {
-      sessionId,
-      prompt: [{ type: "text", text }]
-    });
+  /**
+   * What kinds of content this agent accepts in a prompt. Read from the
+   * `initialize` result rather than assumed: Grok Build declines image and
+   * audio blocks but accepts embedded context, and other harnesses differ.
+   * Absent capabilities default to text-only, which every agent supports.
+   */
+  promptCapabilities() {
+    return this.initializeResult?.agentCapabilities?.promptCapabilities ?? {};
+  }
+
+  /**
+   * Send a prompt; resolves when the turn ends. Content streams via "update".
+   *
+   * Accepts either a plain string or a pre-built array of ACP content blocks,
+   * so attachments can be carried without this method knowing how they were
+   * converted.
+   */
+  async prompt(sessionId, textOrBlocks) {
+    const prompt = Array.isArray(textOrBlocks)
+      ? textOrBlocks
+      : [{ type: "text", text: textOrBlocks }];
+    return this.request("session/prompt", { sessionId, prompt });
   }
 
   /**

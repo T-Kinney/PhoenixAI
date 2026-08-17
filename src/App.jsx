@@ -16,11 +16,56 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Bot, ChevronDown, Download, FolderOpen, Loader2, Plus, Send, Settings,
-  Square, Terminal, Workflow, X, Zap
+  Bot, ChevronDown, Download, FileText, FolderOpen, Image, Loader2, Paperclip,
+  Plus, Send, Settings, Square, Terminal, Workflow, X, Zap
 } from "lucide-react";
 import { useAgentSession } from "./useAgentSession.js";
 import { PermissionDialog, ToolCallStream, ThoughtPanel, AgentStatusBar } from "./AgentPanels.jsx";
+
+/** Anything larger than this is refused with a reason rather than silently truncated. */
+const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
+
+const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp|avif|heic|svg)$/i;
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** Read a File into the {name, data} shape the prompt endpoint expects. */
+function readFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+    reader.onload = () => {
+      // readAsDataURL gives "data:<mime>;base64,<payload>" — the server wants
+      // only the payload.
+      const comma = String(reader.result).indexOf(",");
+      resolve({
+        name: file.name || "pasted-file",
+        size: file.size,
+        data: String(reader.result).slice(comma + 1)
+      });
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/** One attached file, with a way to remove it before sending. */
+function AttachmentChip({ file, onRemove }) {
+  const isImage = IMAGE_RE.test(file.name);
+  return (
+    <div className="attachChip" title={`${file.name} — ${formatBytes(file.size)}`}>
+      {isImage ? <Image size={12} /> : <FileText size={12} />}
+      <span className="attachName">{file.name}</span>
+      <span className="attachSize">{formatBytes(file.size)}</span>
+      <button className="attachRemove" onClick={() => onRemove(file.id)} title="Remove">
+        <X size={11} />
+      </button>
+    </div>
+  );
+}
 
 /**
  * Update notice.
@@ -278,7 +323,36 @@ export default function App() {
   const scrollRef = useRef(null);
 
   const [activeProjectId, setActiveProjectId] = useState(null);
+  const [attachments, setAttachments] = useState([]);
+  const [dragging, setDragging] = useState(false);
+  const fileInputRef = useRef(null);
+  // Drag events fire for every child element, so a plain boolean flickers.
+  // Counting enter/leave pairs is what keeps the overlay stable.
+  const dragDepth = useRef(0);
   const session = useAgentSession(activeThreadId);
+
+  const addFiles = useCallback(async (fileList) => {
+    const incoming = Array.from(fileList ?? []);
+    if (!incoming.length) return;
+    const accepted = [];
+    for (const file of incoming) {
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        setError(`${file.name} is ${formatBytes(file.size)} — the limit is ${formatBytes(MAX_ATTACHMENT_BYTES)}.`);
+        continue;
+      }
+      try {
+        const read = await readFile(file);
+        accepted.push({ ...read, id: `${file.name}-${file.size}-${accepted.length}-${performance.now()}` });
+      } catch (e) {
+        setError(e.message);
+      }
+    }
+    if (accepted.length) setAttachments((prev) => [...prev, ...accepted]);
+  }, []);
+
+  const removeAttachment = useCallback((id) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+  }, []);
 
   // The agent's working directory. Explicit selection wins; otherwise follow
   // the open thread; otherwise the first project.
@@ -347,14 +421,18 @@ export default function App() {
 
   const send = useCallback(async () => {
     const text = draft.trim();
-    if (!text) return;
+    // A file with no prose is a valid message.
+    if (!text && attachments.length === 0) return;
     // Queue rather than block while a turn is running; it flushes on completion.
     if (session.busy) { session.enqueue(text); setDraft(""); return; }
     const threadId = activeThreadId ?? await newThread();
     if (!threadId) return;
+    const payload = attachments.map(({ name, data, size }) => ({ name, data, size }));
     setDraft("");
-    session.send(text, { threadId, projectPath: project?.path }).catch(() => {});
-  }, [draft, session, activeThreadId, newThread, project]);
+    setAttachments([]);
+    session.send(text, { threadId, projectPath: project?.path, attachments: payload })
+      .catch(() => {});
+  }, [draft, attachments, session, activeThreadId, newThread, project]);
 
   const messages = bundle?.messages ?? [];
 
@@ -434,7 +512,43 @@ export default function App() {
           )}
         </div>
 
-        <div className="composer">
+        <div
+          className={cx("composer", dragging && "composerDragging")}
+          onDragEnter={(e) => {
+            if (!e.dataTransfer?.types?.includes("Files")) return;
+            e.preventDefault();
+            dragDepth.current += 1;
+            setDragging(true);
+          }}
+          onDragOver={(e) => {
+            if (e.dataTransfer?.types?.includes("Files")) e.preventDefault();
+          }}
+          onDragLeave={() => {
+            dragDepth.current = Math.max(0, dragDepth.current - 1);
+            if (dragDepth.current === 0) setDragging(false);
+          }}
+          onDrop={(e) => {
+            if (!e.dataTransfer?.files?.length) return;
+            e.preventDefault();
+            dragDepth.current = 0;
+            setDragging(false);
+            addFiles(e.dataTransfer.files);
+          }}
+        >
+          {dragging && (
+            <div className="dropHint">
+              <Paperclip size={14} /> Drop files to attach
+            </div>
+          )}
+
+          {attachments.length > 0 && (
+            <div className="attachRow">
+              {attachments.map((file) => (
+                <AttachmentChip key={file.id} file={file} onRemove={removeAttachment} />
+              ))}
+            </div>
+          )}
+
           {session.queue.length > 0 && (
             <div className="queue">
               {session.queue.map((q) => (
@@ -452,10 +566,31 @@ export default function App() {
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
             }}
+            onPaste={(e) => {
+              // Screenshots arrive on the clipboard as files with no name.
+              const files = Array.from(e.clipboardData?.files ?? []);
+              if (!files.length) return;
+              e.preventDefault();
+              addFiles(files);
+            }}
             placeholder={session.busy ? "Agent is working — your message will queue…" : "Describe what you want built…"}
             rows={3}
           />
           <div className="composerBar">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              hidden
+              onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }}
+            />
+            <button
+              className="iconBtn"
+              onClick={() => fileInputRef.current?.click()}
+              title="Attach files"
+            >
+              <Paperclip size={15} />
+            </button>
             <AgentPicker value={agent} onChange={setAgent} harnesses={harnesses} busy={session.busy} />
             {project ? (
               <span className="workingIn" title={project.path}>
@@ -470,7 +605,11 @@ export default function App() {
                 <Square size={13} /> Stop
               </button>
             ) : (
-              <button className="sendBtn" onClick={send} disabled={!draft.trim()}>
+              <button
+                className="sendBtn"
+                onClick={send}
+                disabled={!draft.trim() && attachments.length === 0}
+              >
                 <Send size={13} /> Send
               </button>
             )}

@@ -146,7 +146,10 @@ export function buildRoutes(deps = {}) {
       // minutes. Completion arrives on the event stream.
       ["POST", "/api/agent/prompt", async ({ body }) =>
         sessions.startPrompt(requireThreadId(body.threadId), String(body.text ?? ""), {
-          projectPath: body.projectPath
+          projectPath: body.projectPath,
+          // [{name, data}] with data base64. Converted to ACP content blocks
+          // against the live agent's declared capabilities.
+          attachments: Array.isArray(body.attachments) ? body.attachments : []
         })],
 
       ["POST", "/api/agent/cancel",

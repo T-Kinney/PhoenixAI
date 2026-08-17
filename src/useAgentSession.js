@@ -295,8 +295,10 @@ export function useAgentSession(threadId) {
     }).catch(() => {});
   }, [bridge, permission]);
 
-  const send = useCallback(async (text, { projectPath = null, threadId = null } = {}) => {
-    if (!text?.trim()) return;
+  const send = useCallback(async (text, { projectPath = null, threadId = null, attachments = [] } = {}) => {
+    // An attachment alone is a legitimate message — "look at this" with a file
+    // and no prose should send.
+    if (!text?.trim() && !attachments.length) return;
     // thread?.id lags behind a bundle refetch, so callers may pass the id they
     // just resolved. Without one there is nothing to bind a session to.
     const target = threadId || threadRef.current;
@@ -304,12 +306,19 @@ export function useAgentSession(threadId) {
     setBusy(true);
     setError(null);
     // Echo immediately; the agent's own user_message_chunk may lag.
-    setState((prev) => ({ ...prev, turns: [...prev.turns, { role: "user", text }] }));
+    setState((prev) => ({
+      ...prev,
+      turns: [...prev.turns, {
+        role: "user",
+        text,
+        attachments: attachments.map((a) => a.name)
+      }]
+    }));
     try {
       const response = await fetch("/api/agent/prompt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ threadId: target, text, projectPath })
+        body: JSON.stringify({ threadId: target, text, projectPath, attachments })
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data?.error || `${response.status}`);

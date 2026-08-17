@@ -19,6 +19,7 @@ import { EventEmitter } from "node:events";
 import { GrokDaemon } from "./daemon.js";
 import { UPDATE_KINDS, DANGEROUS_OPTION_IDS } from "./client.js";
 import { WorkflowTracker, isWorkflowUpdate, workflowsFromCommands } from "./workflows.js";
+import { buildPromptBlocks } from "./attachments.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // A spawned child process cannot read from inside app.asar, so in a packaged
@@ -592,13 +593,28 @@ export class SessionManager extends EventEmitter {
    * update stream — holding an HTTP request open for a multi-minute agent run
    * makes the endpoint unusable from a browser.
    */
-  async startPrompt(threadId, text, { projectPath = null } = {}) {
+  async startPrompt(threadId, text, { projectPath = null, attachments = [] } = {}) {
     const { sessionId, resumed } = await this.ensureSession(threadId, projectPath);
     const client = this.#client;
+
+    // Attachments are converted against the LIVE agent's declared capabilities,
+    // so the same file becomes an inline image on an agent that takes images
+    // and a staged path on one that does not.
+    let payload = text;
+    let notes = [];
+    if (attachments.length) {
+      const built = await buildPromptBlocks(text, attachments, {
+        capabilities: client.promptCapabilities(),
+        stagingDir: this.#attachmentDir()
+      });
+      payload = built.blocks;
+      notes = built.notes;
+    }
+
     this.#activeTurns += 1;
     this.#touch();
     const done = () => { this.#activeTurns = Math.max(0, this.#activeTurns - 1); this.#touch(); };
-    client.prompt(sessionId, text)
+    client.prompt(sessionId, payload)
       .then((result) => { done(); this.emit("turn-complete", { threadId, sessionId, result }); })
       .catch((error) => { done(); this.emit("turn-error", {
         threadId,
@@ -607,7 +623,16 @@ export class SessionManager extends EventEmitter {
         // Quota exhaustion is a decision point, not a malfunction.
         quota: /usage limit|balance exhausted|plan limit|rate limit/i.test(error.message || "")
       }); });
-    return { sessionId, resumed, accepted: true };
+    return { sessionId, resumed, accepted: true, attachments: notes };
+  }
+
+  /**
+   * Where attached files are written when the agent will not take their bytes
+   * inline. Kept beside the session state, never inside the user's project — an
+   * attachment must not litter the repo the agent is working in.
+   */
+  #attachmentDir() {
+    return path.join(path.dirname(this.statePath), "attachments");
   }
 
   cancel(threadId) {
