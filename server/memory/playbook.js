@@ -134,9 +134,18 @@ export function parsePlaybook(markdown) {
   flush();
 
   // Explode the DEAD LIST into individual "never relearn" items.
+  //
+  // The list is prose wrapped across lines, so newlines must be joined BEFORE
+  // splitting or every wrapped item shatters: "annual-meeting\ncalendar as a
+  // STRONG announcement predictor" became two useless fragments, and
+  // "RSI>70 as danger\n(it's pre-pump)" orphaned the clarifier that carries the
+  // actual reason. Semicolons are the real separator; newlines are just wrap.
   for (const entry of entries.filter((e) => e.isDeadList)) {
-    for (const item of entry.body.split(/[;\n]+/)) {
-      const clean = item.replace(/^[-*\s]+/, "").trim().replace(/\.$/, "");
+    const joined = entry.body.replace(/\s*\r?\n\s*/g, " ");
+    for (const item of joined.split(";")) {
+      // Strip bullet markers only when a separator follows, so the sign in
+      // "-30% cap" survives — stripping it inverts the rule's meaning.
+      const clean = item.replace(/^\s*[-*•]\s+/, "").trim().replace(/\.$/, "");
       if (clean.length > 2) deadList.push(clean);
     }
   }
