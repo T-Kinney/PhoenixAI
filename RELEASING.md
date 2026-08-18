@@ -87,3 +87,18 @@ them; the same scan across all 68 blobs in git history was also clean. `.env`
 sits at the repo root but is not in `build.files`, so `electron-builder` never
 copies it into the installer. If you add a new secret-bearing path, re-check with
 the same approach rather than assuming.
+
+## If a release uploads only the blockmap
+
+Symptom: `422 Unprocessable Entity — "Published releases must have a valid tag"`,
+and the GitHub release ends up with `PhoenixAI-Setup-X.Y.Z.exe.blockmap` but no
+installer and no `latest.yml`.
+
+Cause: electron-builder uploads assets concurrently, and when the release does
+not exist yet each upload tries to create it. One wins, the other 422s and its
+asset is lost. Without `latest.yml` the updater has no manifest, so auto-update
+silently does nothing.
+
+`npm run release` now pushes the git tag first (`scripts/tag-release.mjs`), which
+removes the race. If you hit this on an older version, just run `npm run release`
+again — the release exists by then, so the uploads attach instead of racing.

@@ -14,7 +14,7 @@
     "package:folder": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-desktop.ps1",
     "dist:win": "npm.cmd run icon && npm.cmd run build && electron-builder --win nsis --x64",
     "icon": "node scripts/make-icon.mjs",
-    "release": "npm.cmd run icon && npm.cmd run build && electron-builder --win nsis --x64 --publish always",
+    "release": "node scripts/tag-release.mjs && npm.cmd run icon && npm.cmd run build && electron-builder --win nsis --x64 --publish always",
     "release:dry": "npm.cmd run icon && npm.cmd run build && electron-builder --win nsis --x64 --publish never"
   },
   "dependencies": {
