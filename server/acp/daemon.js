@@ -12,6 +12,8 @@
  */
 
 import { spawn } from "node:child_process";
+import { statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import net from "node:net";
 import { EventEmitter } from "node:events";
@@ -197,8 +199,18 @@ export class GrokDaemon extends EventEmitter {
       "--bind", `${HOST}:${this.#port}`
     ];
 
+    // A cwd that is not an existing directory makes spawn fail with ENOENT,
+    // which reads as "grok.exe is missing" and sends you hunting the wrong bug.
+    // Fall back to a directory that always exists.
+    let spawnCwd = this.cwd;
+    try {
+      if (!statSync(spawnCwd).isDirectory()) spawnCwd = tmpdir();
+    } catch {
+      spawnCwd = tmpdir();
+    }
+
     this.#proc = spawn(this.bin, args, {
-      cwd: this.cwd,
+      cwd: spawnCwd,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
       env: (() => {

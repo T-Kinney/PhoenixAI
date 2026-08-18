@@ -187,7 +187,10 @@ app.whenReady().then(() => {
   // an agent until something actually needs one.
   sessions = new sessionModule.SessionManager({
     statePath: path.join(app.getPath("userData"), "data", "acp-sessions.json"),
-    defaultCwd: apiModule.rootDir,
+    // NOT rootDir: in a packaged build that resolves inside app.asar, which is
+    // a FILE. Spawning the agent daemon with a cwd that is not a real directory
+    // fails with ENOENT, so the agent never starts.
+    defaultCwd: app.getPath("userData"),
     // Attaching this makes the memory MCP server available to every agent
     // session, which is what lets Grok (and any other harness) consult the
     // project's accumulated knowledge instead of starting cold.
