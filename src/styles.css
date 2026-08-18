@@ -401,3 +401,21 @@ button { font: inherit; color: inherit; cursor: pointer; }
   max-width: 15rem; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
 }
 .workingInNone { color: var(--danger); }
+
+/* Approval posture --------------------------------------------------------
+   Always visible in the composer, never buried in a settings pane: a user must
+   be able to see at a glance whether the agent is running unattended. */
+.approvalChip {
+  display: flex; align-items: center; gap: .35rem;
+  padding: .25rem .55rem; font: inherit; font-size: .74rem;
+  cursor: pointer; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--surface); color: inherit;
+  opacity: .75;
+}
+.approvalChip:hover { opacity: 1; }
+.approvalChipAuto {
+  opacity: 1; font-weight: 600;
+  border-color: var(--accent, #9a5b1e);
+  color: var(--accent, #9a5b1e);
+  background: var(--accent-soft, rgba(200, 120, 40, .10));
+}

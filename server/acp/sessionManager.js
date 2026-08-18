@@ -76,6 +76,7 @@ export class SessionManager extends EventEmitter {
   constructor({
     statePath,
     defaultCwd = process.cwd(),
+    approvalMode = "ask",
     // Path to the memory database. When set, the memory MCP server is attached
     // to every session — which is the ONLY mechanism by which our knowledge
     // store reaches the agent's tool loop. Without it the memory layer exists
@@ -92,6 +93,11 @@ export class SessionManager extends EventEmitter {
     super();
     this.statePath = statePath;
     this.defaultCwd = defaultCwd;
+    // "ask" prompts for every action; "auto" answers allow-once on the user's
+    // behalf. Auto never selects allow_always: that flips a persistent switch
+    // inside the agent that outlives this setting, so turning auto-approve off
+    // again would not actually restore prompting.
+    this.approvalMode = approvalMode;
     this.memoryDbPath = memoryDbPath;
     this.playbookPath = playbookPath;
     this.idleReleaseMs = idleReleaseMs;

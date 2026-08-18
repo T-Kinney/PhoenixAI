@@ -36,6 +36,9 @@ contextBridge.exposeInMainWorld("agentBridge", {
   /** A permission was answered elsewhere (cancel, expiry, another window). */
   onPermissionResolved: subscribe("agent:permission-resolved"),
 
+  /** Fired when auto-approve answered on the user's behalf. */
+  onPermissionAuto: subscribe("agent:permission-auto"),
+
   onConnected: subscribe("agent:connected"),
   onDisconnected: subscribe("agent:disconnected"),
 

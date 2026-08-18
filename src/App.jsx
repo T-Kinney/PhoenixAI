@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot, ChevronDown, Download, FileText, FolderOpen, Image, Loader2, Paperclip,
-  Plus, Send, Settings, Square, Terminal, Workflow, X, Zap
+  Plus, Send, Settings, ShieldCheck, Square, Terminal, Workflow, X, Zap
 } from "lucide-react";
 import { useAgentSession } from "./useAgentSession.js";
 import { PermissionDialog, ToolCallStream, ThoughtPanel, AgentStatusBar } from "./AgentPanels.jsx";
@@ -349,6 +349,7 @@ export default function App() {
 
   const [activeProjectId, setActiveProjectId] = useState(null);
   const [attachments, setAttachments] = useState([]);
+  const [approvalMode, setApprovalMode] = useState("ask");
   const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef(null);
   // Drag events fire for every child element, so a plain boolean flickers.
@@ -402,6 +403,7 @@ export default function App() {
 
   useEffect(() => {
     api("/api/workspace").then(setWorkspace).catch((e) => setError(e.message));
+    api("/api/agent/approval-mode").then((d) => setApprovalMode(d.mode)).catch(() => {});
     api("/api/harnesses/ready")
       .then((d) => setHarnesses({
         // The locally installed Grok is listed first and separately: it uses
@@ -650,6 +652,23 @@ export default function App() {
             ) : (
               <span className="workingIn workingInNone">No project selected</span>
             )}
+            <button
+              className={cx("approvalChip", approvalMode === "auto" && "approvalChipAuto")}
+              title={approvalMode === "auto"
+                ? "The agent runs without asking. Click to require approval."
+                : "You approve each action. Click to let the agent run unattended."}
+              onClick={async () => {
+                const next = approvalMode === "auto" ? "ask" : "auto";
+                setApprovalMode(next);
+                await api("/api/agent/approval-mode", {
+                  method: "POST", body: JSON.stringify({ mode: next })
+                }).catch((e) => { setError(e.message); setApprovalMode(approvalMode); });
+              }}
+            >
+              {approvalMode === "auto"
+                ? <><Zap size={12} /> Auto-approve</>
+                : <><ShieldCheck size={12} /> Ask each time</>}
+            </button>
             <div className="composerSpacer" />
             {session.busy ? (
               <button className="sendBtn sendBtnStop" onClick={session.cancel}>

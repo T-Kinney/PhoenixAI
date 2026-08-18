@@ -152,6 +152,17 @@ export function buildRoutes(deps = {}) {
           attachments: Array.isArray(body.attachments) ? body.attachments : []
         })],
 
+      // Approval posture. Persisted in config so it survives a restart, and
+      // applied to the live manager immediately rather than only on next launch.
+      ["GET", "/api/agent/approval-mode", async () => ({ mode: sessions?.approvalMode ?? "ask" })],
+      ["POST", "/api/agent/approval-mode", async ({ body }) => {
+        const mode = body?.mode === "auto" ? "auto" : "ask";
+        if (sessions) sessions.approvalMode = mode;
+        const config = await api.readConfig();
+        await api.writeConfig({ ...config, approvalMode: mode });
+        return { mode };
+      }],
+
       ["POST", "/api/agent/cancel",
         async ({ body }) => sessions.cancel(requireThreadId(body.threadId))],
 

@@ -236,6 +236,18 @@ export function useAgentSession(threadId) {
     // build quota exhaustion and turn errors were invisible, and a permission
     // resolved elsewhere left the modal up forever.
     const offResolved = bridge.onPermissionResolved?.(() => setPermission(null));
+
+    // Auto-approved actions are recorded, not hidden. A granted permission the
+    // user never sees is indistinguishable from one that never happened.
+    const offAuto = bridge.onPermissionAuto?.((info) => {
+      setState((prev) => ({
+        ...prev,
+        autoApproved: [
+          { id: info.id, title: info.toolCall?.title || info.title || "action", at: Date.now() },
+          ...(prev.autoApproved ?? [])
+        ].slice(0, 50)
+      }));
+    });
     const offTurnComplete = bridge.onTurnComplete?.(() => setBusy(false));
     const offTurnError = bridge.onTurnError?.((info) => {
       setBusy(false);
@@ -258,6 +270,7 @@ export function useAgentSession(threadId) {
       offUpdate?.();
       offPermission?.();
       offResolved?.();
+      offAuto?.();
       offTurnComplete?.();
       offTurnError?.();
       offDaemonError?.();
@@ -365,7 +378,20 @@ export function useAgentSession(threadId) {
   }, [busy, queue, send]);
 
   // Reset when the user switches threads.
+  //
+  // NOT when a thread first appears. Sending the very first message creates
+  // the thread it is sent to, so threadId goes null -> "t123" WHILE the turn
+  // is already streaming. Treating that as a switch wiped the tool calls (the
+  // activity panel stayed empty for the whole run), cleared busy, and — worst
+  // — auto-DENIED the permission dialog the user was looking at.
+  const previousThreadId = useRef(threadId);
   useEffect(() => {
+    const previous = previousThreadId.current;
+    previousThreadId.current = threadId;
+    // A session that began with no thread adopting its first one is not a
+    // switch: there is nothing to discard and a turn may be in flight.
+    if (previous == null || previous === threadId) return;
+
     if (replayTimer.current) {
       clearTimeout(replayTimer.current);
       replayTimer.current = null;

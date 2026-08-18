@@ -191,6 +191,7 @@ app.whenReady().then(() => {
     // a FILE. Spawning the agent daemon with a cwd that is not a real directory
     // fails with ENOENT, so the agent never starts.
     defaultCwd: app.getPath("userData"),
+    approvalMode: (await apiModule.readConfig().catch(() => ({})))?.approvalMode ?? "ask",
     // Attaching this makes the memory MCP server available to every agent
     // session, which is what lets Grok (and any other harness) consult the
     // project's accumulated knowledge instead of starting cold.
@@ -199,6 +200,9 @@ app.whenReady().then(() => {
   await sessions.load();
   sessions.on("permission", onAgentPermission);
   sessions.on("permission-resolved", (info) => broadcast("agent:permission-resolved", info));
+  // Auto-approved actions still reach the UI: granting silently with no record
+  // is how a user loses track of what the agent did on their machine.
+  sessions.on("permission-auto", (info) => broadcast("agent:permission-auto", info));
   sessions.on("update", (payload) => broadcast("agent:update", payload));
   sessions.on("connected", (status) => broadcast("agent:connected", status));
   sessions.on("disconnected", (info) => broadcast("agent:disconnected", info));
