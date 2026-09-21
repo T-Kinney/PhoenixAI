@@ -242,6 +242,23 @@ export class MemoryStore {
     }));
   }
 
+  /** User/assistant transcript reconstructed from exact append-only ACP events. */
+  conversationForThread(threadId, { limit = 5000 } = {}) {
+    const events = this.eventsForThread(threadId, { limit });
+    const turns = [];
+    for (const event of events) {
+      if (!event.text) continue;
+      if (event.kind === "user_prompt") {
+        turns.push({ role: "user", text: event.text });
+      } else if (event.kind === "agent_message_chunk") {
+        const last = turns[turns.length - 1];
+        if (last?.role === "assistant") last.text += event.text;
+        else turns.push({ role: "assistant", text: event.text });
+      }
+    }
+    return turns;
+  }
+
   countEvents(threadId) {
     return Number(this.db.prepare("SELECT COUNT(*) n FROM events WHERE thread_id=?")
       .get(threadId)?.n ?? 0);

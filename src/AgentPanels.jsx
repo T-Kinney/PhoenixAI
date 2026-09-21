@@ -22,6 +22,11 @@ function optionTone(kind) {
  * deliberately has no dismiss-by-clicking-away.
  */
 export function PermissionDialog({ request, onAnswer }) {
+  const dialogRef = React.useRef(null);
+  React.useEffect(() => {
+    if (!request) return;
+    dialogRef.current?.querySelector("button")?.focus();
+  }, [request]);
   if (!request) return null;
 
   const title = request.toolCall?.title || request.title || "Agent action";
@@ -32,8 +37,9 @@ export function PermissionDialog({ request, onAnswer }) {
   );
 
   return (
-    <div className="agentModalBackdrop" role="dialog" aria-modal="true" aria-label="Agent permission request">
-      <div className="agentModal">
+    <div className="agentModalBackdrop" role="dialog" aria-modal="true" aria-label="Agent permission request"
+      onKeyDown={(event) => { if (event.key === "Escape") onAnswer(null); }}>
+      <div className="agentModal" ref={dialogRef}>
         <div className="agentModalHead">
           <span className="agentModalKind">{kind || "permission"}</span>
           <h3>{title}</h3>
@@ -136,12 +142,10 @@ export function AgentStatusBar({ connection, error, busy, onCancel }) {
     return <div className="agentStatus agentStatusError">Agent disconnected. The next message reconnects.</div>;
   }
 
-  const auth = connection?.detail?.authMode;
   return (
     <div className="agentStatus">
       <span className={`agentDot ${busy ? "agentDotBusy" : "agentDotIdle"}`} />
       {busy ? "Agent working" : "Ready"}
-      {auth && <span className="agentAuthMode"> · {auth}</span>}
       {busy && (
         <button className="agentBtn agentBtnQuiet agentCancel" onClick={onCancel}>Stop</button>
       )}

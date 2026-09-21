@@ -18,6 +18,7 @@ import { randomBytes } from "node:crypto";
 import net from "node:net";
 import { EventEmitter } from "node:events";
 import { GrokAcpClient, DEFAULT_GROK_BIN } from "./client.js";
+import { safeChildEnv } from "../security.js";
 
 const HOST = "127.0.0.1";
 const STARTUP_TIMEOUT_MS = 30_000;
@@ -214,7 +215,7 @@ export class GrokDaemon extends EventEmitter {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
       env: (() => {
-        const merged = { ...process.env, ...this.env };
+        const merged = safeChildEnv(this.env);
         // Force subscription/session auth. Scrubbing key env vars does NOT
         // achieve this: cached_token already outranks the api key for billing,
         // and the agent re-populates XAI_API_KEY on itself from ~/.grok/auth.json

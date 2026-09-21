@@ -1,6 +1,8 @@
 {
   "name": "phoenixai",
-  "version": "0.1.5",
+  "version": "0.2.0",
+  "description": "A secure multi-model desktop workspace led by Grok Build.",
+  "author": "PhoenixAI contributors",
   "private": true,
   "type": "module",
   "main": "electron/main.js",
@@ -10,30 +12,37 @@
     "desktop": "npm.cmd run build && electron .",
     "bench:local": "node scripts/benchmark-local-model.mjs",
     "build": "vite build",
+    "test": "node --test",
+    "verify": "npm.cmd test && npm.cmd run build",
+    "verify:package": "node scripts/verify-packaged.mjs",
+    "verify:installer": "node scripts/verify-packaged.mjs --installer",
+    "clean:release": "node scripts/clean-release.mjs",
+    "provision:local-credentials": "electron scripts/provision-local-credentials.mjs",
     "preview": "vite preview --host 127.0.0.1",
-    "package:folder": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-desktop.ps1",
-    "dist:win": "npm.cmd run icon && npm.cmd run build && electron-builder --win nsis --x64",
+    "package:folder": "npm.cmd run provision:local-credentials && npm.cmd run clean:release && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-desktop.ps1 && npm.cmd run clean:release",
+    "dist:win": "npm.cmd run provision:local-credentials && npm.cmd run clean:release && npm.cmd run icon && npm.cmd run verify && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Publish never && npm.cmd run verify:installer && npm.cmd run clean:release",
     "icon": "node scripts/make-icon.mjs",
-    "release": "node scripts/tag-release.mjs && npm.cmd run icon && npm.cmd run build && electron-builder --win nsis --x64 --publish always",
-    "release:dry": "npm.cmd run icon && npm.cmd run build && electron-builder --win nsis --x64 --publish never"
+    "release": "node scripts/verify-release.mjs && npm.cmd run clean:release && npm.cmd run icon && npm.cmd run verify && node scripts/tag-release.mjs && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Publish always && node scripts/verify-packaged.mjs --installer --require-signed && npm.cmd run clean:release",
+    "release:dry": "npm.cmd run provision:local-credentials && npm.cmd run clean:release && npm.cmd run icon && npm.cmd run verify && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Publish never && npm.cmd run verify:installer && npm.cmd run clean:release"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
-    "concurrently": "latest",
-    "cors": "latest",
-    "dotenv": "latest",
+    "cors": "2.8.6",
+    "dotenv": "17.4.2",
     "electron-log": "^5.4.4",
     "electron-updater": "^6.8.9",
-    "express": "latest",
-    "lucide-react": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "vite": "latest"
+    "express": "5.2.1"
   },
   "devDependencies": {
-    "electron": "latest",
-    "electron-builder": "latest",
-    "png-to-ico": "latest"
+    "@electron/asar": "3.4.1",
+    "@vitejs/plugin-react": "6.0.2",
+    "concurrently": "10.0.5",
+    "electron": "42.9.3",
+    "electron-builder": "26.15.3",
+    "lucide-react": "1.18.0",
+    "png-to-ico": "3.0.1",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "vite": "8.0.16"
   },
   "build": {
     "appId": "com.rykerphoenix.phoenixai",
@@ -48,13 +57,16 @@
       "scripts/**/*",
       "server/**/*",
       "package.json",
+      "PRIVACY.md",
+      "SECURITY.md",
       "resources/**/*"
     ],
     "win": {
       "target": [
         "nsis"
       ],
-      "icon": "resources/icon.ico"
+      "icon": "resources/icon.ico",
+      "verifyUpdateCodeSignature": true
     },
     "nsis": {
       "oneClick": false,

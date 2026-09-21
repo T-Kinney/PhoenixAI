@@ -1,5 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, protocol, safeStorage, shell } from "electron";
 import { startAutoUpdate } from "./updater.js";
+import { CredentialVault } from "./credentials.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,6 +59,7 @@ let sessions = null;
 let buildRoutes = null;
 let matchRoute = null;
 let updater = null;
+let credentialVault = null;
 // The last update state, replayed to windows that open after it was emitted so
 // a late-opening window still shows "restart to update".
 let lastUpdateState = null;
@@ -113,6 +115,7 @@ async function handleApi(request, pathname) {
 
 async function handleAppProtocol(request) {
   const url = new URL(request.url);
+  if (url.hostname !== "app") return jsonResponse({ error: "Forbidden host" }, 403);
   const pathname = url.pathname || "/";
 
   if (pathname.startsWith("/api/")) {
@@ -121,19 +124,28 @@ async function handleAppProtocol(request) {
 
   const safePath = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
   const resolved = path.resolve(distDir, safePath);
-  if (!resolved.startsWith(distDir)) {
+  const relative = path.relative(distDir, resolved);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
     return jsonResponse({ error: "Forbidden" }, 403);
   }
 
   try {
     const bytes = await fs.readFile(resolved);
     return new Response(bytes, {
-      headers: { "content-type": contentTypeFor(resolved) }
+      headers: {
+        "content-type": contentTypeFor(resolved),
+        "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "x-content-type-options": "nosniff"
+      }
     });
   } catch {
     const index = await fs.readFile(path.join(distDir, "index.html"));
     return new Response(index, {
-      headers: { "content-type": "text/html; charset=utf-8" }
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "x-content-type-options": "nosniff"
+      }
     });
   }
 }
@@ -170,6 +182,7 @@ app.setName("PhoenixAI");
 app.setAppUserModelId("com.rykerphoenix.phoenixai");
 
 app.whenReady().then(() => {
+  process.env.AGENTCC_STATE_DIR = app.getPath("userData");
   process.env.AGENTCC_DATA_DIR = path.join(app.getPath("userData"), "data");
   process.env.AGENTCC_ENV_PATH = path.join(app.getPath("userData"), ".env");
   return Promise.all([
@@ -182,6 +195,13 @@ app.whenReady().then(() => {
   buildRoutes = routesModule.buildRoutes;
   matchRoute = routesModule.matchRoute;
 
+  credentialVault = new CredentialVault({
+    filePath: path.join(app.getPath("userData"), "data", "credentials.json"),
+    storage: safeStorage
+  });
+  await credentialVault.load();
+  const startupConfig = await apiModule.readConfig().catch(() => ({}));
+
   // The ACP session manager binds threads to Grok Build sessions. The daemon
   // itself is started lazily on first use, so launching the app does not spawn
   // an agent until something actually needs one.
@@ -191,7 +211,10 @@ app.whenReady().then(() => {
     // a FILE. Spawning the agent daemon with a cwd that is not a real directory
     // fails with ENOENT, so the agent never starts.
     defaultCwd: app.getPath("userData"),
-    approvalMode: (await apiModule.readConfig().catch(() => ({})))?.approvalMode ?? "ask",
+    approvalMode: startupConfig.approvalMode ?? "ask",
+    reasoningEffort: startupConfig.reasoningEffort ?? null,
+    spendingSafety: startupConfig.spendingSafety ?? null,
+    spendLedgerPath: apiModule.spendLedgerPath,
     // Attaching this makes the memory MCP server available to every agent
     // session, which is what lets Grok (and any other harness) consult the
     // project's accumulated knowledge instead of starting cold.
@@ -217,6 +240,8 @@ app.whenReady().then(() => {
   sessions.on("idle-release", (info) => broadcast("agent:idle-release", info));
   sessions.on("auth-complete", (info) => broadcast("agent:auth-complete", info));
   sessions.on("auth-error", (info) => broadcast("agent:auth-error", info));
+  sessions.on("billing", (info) => broadcast("agent:billing", info));
+  sessions.on("memory-recall", (info) => broadcast("agent:memory-recall", info));
 
   // The manager validates the id and the option, so a compromised renderer
   // cannot name an option the agent never offered.
@@ -241,7 +266,7 @@ app.whenReady().then(() => {
   ipcMain.handle("update:check", () => { updater.check(); });
   ipcMain.handle("update:install", () => { updater.quitAndInstall(); });
 
-  routes = buildRoutes({ selectFolder, sessions });
+  routes = buildRoutes({ selectFolder, sessions, credentials: credentialVault });
 
   protocol.handle("phoenix", handleAppProtocol);
   createWindow();

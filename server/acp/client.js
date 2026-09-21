@@ -339,6 +339,11 @@ export class GrokAcpClient extends EventEmitter {
     return this.ext("x.ai/auth/check_subscription");
   }
 
+  /** Subscription usage and current billing period exposed by Grok Build. */
+  billing() {
+    return this.ext("x.ai/billing");
+  }
+
   cancel(sessionId) {
     for (const [id, entry] of this.#openPermissions) {
       if (entry.sessionId && entry.sessionId !== sessionId) continue;

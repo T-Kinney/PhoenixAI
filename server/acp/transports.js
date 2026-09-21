@@ -18,6 +18,7 @@
 
 import { spawn } from "node:child_process";
 import readline from "node:readline";
+import { safeChildEnv } from "../security.js";
 
 class BaseTransport {
   constructor() {
@@ -66,7 +67,7 @@ export class StdioTransport extends BaseTransport {
         cwd: this.cwd,
         windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env, ...this.env }
+        env: safeChildEnv(this.env)
       });
 
       // A failed spawn (bad path) emits "error" then "close" and never "exit".

@@ -17,12 +17,31 @@
 import cors from "cors";
 import express from "express";
 import path from "node:path";
-import { handleStripeWebhook, rootDir } from "./api.js";
+import { handleStripeWebhook, readConfig, rootDir } from "./api.js";
 import { buildRoutes, matchRoute } from "./routes.js";
 import { SessionManager } from "./acp/sessionManager.js";
+import { allowedDevOrigin } from "./security.js";
 
 const app = express();
-app.use(cors());
+app.disable("x-powered-by");
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  const fetchSite = req.headers["sec-fetch-site"];
+  if (!allowedDevOrigin(origin) || fetchSite === "cross-site") {
+    return res.status(403).json({ error: "Cross-site access to the local API is forbidden." });
+  }
+  res.setHeader("Cross-Origin-Resource-Policy", "same-site");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  return next();
+});
+app.use(cors({
+  origin(origin, callback) {
+    callback(null, allowedDevOrigin(origin) ? (origin || false) : false);
+  },
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type"],
+  maxAge: 600
+}));
 
 // Must precede express.json(): Stripe signature verification needs the raw body.
 app.post("/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
@@ -45,10 +64,15 @@ app.use((error, _req, res, next) => {
   return next(error);
 });
 
+const startupConfig = await readConfig().catch(() => ({}));
 const sessions = new SessionManager({
   statePath: path.join(rootDir, "data", "acp-sessions.json"),
   defaultCwd: rootDir,
-  memoryDbPath: path.join(rootDir, "data", "memory.db")
+  memoryDbPath: path.join(rootDir, "data", "memory.db"),
+  approvalMode: startupConfig.approvalMode ?? "ask",
+  reasoningEffort: startupConfig.reasoningEffort ?? null,
+  spendingSafety: startupConfig.spendingSafety ?? null,
+  spendLedgerPath: path.join(rootDir, "data", "spend-ledger.json")
 });
 await sessions.load();
 
@@ -77,7 +101,7 @@ app.get("/api/agent/events", (req, res) => {
   const channels = [
     "update", "permission", "permission-resolved", "connected", "disconnected",
     "daemon-output", "daemon-exit", "daemon-error", "turn-complete", "turn-error", "notify",
-    "auth-complete", "auth-error", "workflow", "commands", "idle-release", "released"
+    "auth-complete", "auth-error", "billing", "memory-recall", "workflow", "commands", "idle-release", "released"
   ];
   const bound = channels.map((name) => {
     const fn = (payload) => send(name, payload);

@@ -28,7 +28,7 @@ contextBridge.exposeInMainWorld("agentBridge", {
   available: true,
 
   /** Streamed session updates: { threadId, sessionId, update, isReplay, meta } */
-  onUpdate: subscribe("agent:update"),
+  onAgentUpdate: subscribe("agent:update"),
 
   /** Tool approval requests: { id, sessionId, toolCall, options } */
   onPermission: subscribe("agent:permission"),
@@ -59,6 +59,10 @@ contextBridge.exposeInMainWorld("agentBridge", {
   /** Slash commands and saved workflows the agent advertises. */
   onCommands: subscribe("agent:commands"),
 
+  /** Grok Build shared subscription usage. */
+  onBilling: subscribe("agent:billing"),
+  onMemoryRecall: subscribe("agent:memory-recall"),
+
   /** The daemon was released after idling; the next prompt reconnects. */
   onIdleRelease: subscribe("agent:idle-release"),
 
@@ -81,7 +85,7 @@ contextBridge.exposeInMainWorld("agentBridge", {
   pendingPermissions: () => ipcRenderer.invoke("agent:pending-permissions"),
 
   /** Update lifecycle: checking -> available -> downloading -> ready. */
-  onUpdate: subscribe("update:state"),
+  onUpdaterState: subscribe("update:state"),
 
   /**
    * The current update state. A "ready" event fired before this window opened

@@ -5,6 +5,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { safeChildEnv } from "./security.js";
+import { DEFAULT_SPENDING_SAFETY, SpendGuard, sanitizeSpendingSafety } from "./spendGuard.js";
+import { StrategyLab } from "./strategyLab.js";
+import { PublicMarketData } from "./publicMarketData.js";
+import { ResearchOperations } from "./researchOperations.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const rootDir = path.resolve(__dirname, "..");
@@ -13,16 +18,32 @@ const envCandidates = [
   process.env.AGENTCC_ENV_PATH,
   path.join(rootDir, ".env"),
   path.join(process.cwd(), ".env"),
+  path.join(os.homedir(), ".phoenixai", ".env"),
   path.join(os.homedir(), ".agent-command-center", ".env"),
-  "C:\\dev\\DesktopClient\\.env"
 ].filter(Boolean);
 
 for (const envPath of envCandidates) {
   dotenv.config({ path: envPath, quiet: true });
 }
 
+// QwenCloud's documented name is DASHSCOPE_API_KEY, but many third-party
+// setup guides use QWEN_API_KEY. Accept the alias inside the host without ever
+// exposing or rewriting the secret-bearing .env file.
+if (!process.env.DASHSCOPE_API_KEY && process.env.QWEN_API_KEY) {
+  process.env.DASHSCOPE_API_KEY = process.env.QWEN_API_KEY;
+}
+if (!process.env.MOONSHOT_API_KEY && process.env.KIMI_API_KEY) {
+  process.env.MOONSHOT_API_KEY = process.env.KIMI_API_KEY;
+}
+if (!process.env.PUBLIC_COM_SECRET && process.env.PUBLIC_API_SECRET_KEY) {
+  process.env.PUBLIC_COM_SECRET = process.env.PUBLIC_API_SECRET_KEY;
+}
+if (!process.env.PUBLIC_COM_ACCOUNT_ID && process.env.PUBLIC_DEFAULT_ACCOUNT_ID) {
+  process.env.PUBLIC_COM_ACCOUNT_ID = process.env.PUBLIC_DEFAULT_ACCOUNT_ID;
+}
+
 const appStateDir = process.env.AGENTCC_STATE_DIR
-  || path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Agent Command Center");
+  || path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "PhoenixAI");
 const dataDir = process.env.AGENTCC_DATA_DIR || path.join(rootDir, "data");
 const configPath = path.join(dataDir, "config.json");
 const runsDir = path.join(dataDir, "runs");
@@ -32,16 +53,27 @@ const worktreeLeasesPath = path.join(dataDir, "worktree-leases.json");
 const goalsPath = path.join(dataDir, "goals.json");
 const loopsPath = path.join(dataDir, "loops.json");
 const objectivesPath = path.join(dataDir, "objectives.json");
+const objectiveEventsPath = path.join(dataDir, "objective-events.jsonl");
 const messagesDir = path.join(dataDir, "messages");
+const checkpointsDir = path.join(dataDir, "checkpoints");
 const projectsPath = path.join(dataDir, "projects.json");
 const threadsPath = path.join(dataDir, "threads.json");
 const stripeEventsPath = path.join(dataDir, "stripe-events.jsonl");
+export const spendLedgerPath = path.join(dataDir, "spend-ledger.json");
+const spendGuard = new SpendGuard({ ledgerPath: spendLedgerPath });
+const strategyLab = new StrategyLab({ dataDir });
+const publicMarketData = new PublicMarketData({
+  environment: process.env,
+  auditPath: path.join(dataDir, "market-data-audit.jsonl")
+});
+const researchOperations = new ResearchOperations({ dataDir });
 const liveRuns = new Map();
 const liveLoops = new Map();
 
 export const defaultConfig = {
   activeProviderId: "ollama",
   activeModel: "gemma4-coder:q8",
+  spendingSafety: { ...DEFAULT_SPENDING_SAFETY },
   providers: [
     {
       id: "anthropic",
@@ -80,7 +112,30 @@ export const defaultConfig = {
       kind: "openai-compatible",
       baseUrl: "https://api.moonshot.ai/v1",
       apiKeyEnv: "MOONSHOT_API_KEY",
-      models: ["kimi-k2.7-code", "kimi-k2.6", "kimi-k2.5"]
+      models: ["kimi-k3", "kimi-k2.7-code", "kimi-k2.6"]
+    },
+    {
+      id: "deepseek",
+      name: "DeepSeek direct",
+      kind: "openai-compatible",
+      baseUrl: "https://api.deepseek.com/v1",
+      apiKeyEnv: "DEEPSEEK_API_KEY",
+      models: ["deepseek-v4-pro", "deepseek-v4-flash"]
+    },
+    {
+      id: "qwen",
+      name: "QwenCloud / Model Studio",
+      kind: "openai-compatible",
+      baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      apiKeyEnv: "DASHSCOPE_API_KEY",
+      models: [
+        "qwen3.8-max",
+        "deepseek-v4-pro-0813",
+        "qwen3.8-2.4t-a95b",
+        "qwen3.8-27b",
+        "qwen3.7-plus",
+        "qwen3-coder-next"
+      ]
     },
     {
       id: "lite-gateway",
@@ -110,7 +165,7 @@ export const defaultConfig = {
       baseUrl: "https://api.x.ai/v1",
       apiKeyEnv: "XAI_API_KEY",
       models: [
-        "grok-4.3",
+        "grok-4.6",
         "grok-code-fast",
         "grok-4-1-fast-reasoning",
         "grok-4-1-fast-non-reasoning",
@@ -295,7 +350,7 @@ const providerRuntime = {
     id: "xai",
     name: "xAI Grok API",
     env: "XAI_API_KEY",
-    defaultModel: "grok-4.3",
+    defaultModel: "grok-4.6",
     redactedBaseUrl: "https://api.x.ai/v1",
     baseUrl: "https://api.x.ai/v1"
   },
@@ -319,9 +374,25 @@ const providerRuntime = {
     id: "kimi",
     name: "Kimi API",
     env: "MOONSHOT_API_KEY",
-    defaultModel: "kimi-k2.7-code",
+    defaultModel: "kimi-k3",
     redactedBaseUrl: "https://api.moonshot.ai/v1",
     baseUrl: "https://api.moonshot.ai/v1"
+  },
+  deepseek: {
+    id: "deepseek",
+    name: "DeepSeek direct",
+    env: "DEEPSEEK_API_KEY",
+    defaultModel: "deepseek-v4-pro",
+    redactedBaseUrl: "https://api.deepseek.com/v1",
+    baseUrl: "https://api.deepseek.com/v1"
+  },
+  qwen: {
+    id: "qwen",
+    name: "QwenCloud / Model Studio",
+    env: "DASHSCOPE_API_KEY",
+    defaultModel: "qwen3.8-max",
+    redactedBaseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
   },
   zai: {
     id: "zai-glm",
@@ -466,15 +537,16 @@ async function ensureDataFiles() {
   } catch {
     await fs.writeFile(configPath, JSON.stringify(defaultConfig, null, 2));
   }
+  const initialProject = defaultProject();
   try {
     await fs.access(projectsPath);
   } catch {
-    await fs.writeFile(projectsPath, JSON.stringify([defaultProject()].filter(Boolean), null, 2));
+    await fs.writeFile(projectsPath, JSON.stringify([initialProject].filter(Boolean), null, 2));
   }
   try {
     await fs.access(threadsPath);
   } catch {
-    await fs.writeFile(threadsPath, JSON.stringify([defaultThread()], null, 2));
+    await fs.writeFile(threadsPath, JSON.stringify(initialProject ? [defaultThread(initialProject.id)] : [], null, 2));
   }
   try {
     await fs.access(agentRunsPath);
@@ -501,11 +573,18 @@ async function ensureDataFiles() {
   } catch {
     await fs.writeFile(objectivesPath, JSON.stringify([], null, 2));
   }
-  const seedMessagesPath = path.join(messagesDir, "thread_command_center.json");
   try {
-    await fs.access(seedMessagesPath);
+    await fs.access(objectiveEventsPath);
   } catch {
-    await fs.writeFile(seedMessagesPath, JSON.stringify(defaultMessages(), null, 2));
+    await fs.writeFile(objectiveEventsPath, "");
+  }
+  if (initialProject) {
+    const seedMessagesPath = path.join(messagesDir, "thread_command_center.json");
+    try {
+      await fs.access(seedMessagesPath);
+    } catch {
+      await fs.writeFile(seedMessagesPath, JSON.stringify(defaultMessages(), null, 2));
+    }
   }
 }
 
@@ -533,7 +612,11 @@ function mergeConfig(config) {
     permissions: {
       ...defaultConfig.permissions,
       ...(config?.permissions ?? {})
-    }
+    },
+    spendingSafety: sanitizeSpendingSafety({
+      ...defaultConfig.spendingSafety,
+      ...(config?.spendingSafety ?? {})
+    })
   };
 }
 
@@ -543,10 +626,51 @@ export async function readConfig() {
   return mergeConfig(parseJsonText(raw, defaultConfig));
 }
 
-export async function writeConfig(config) {
+export async function writeConfig(config, { allowPaidEnable = false } = {}) {
   await ensureDataFiles();
-  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
-  return config;
+  const current = await readConfig();
+  const merged = mergeConfig(config);
+  if (!allowPaidEnable && !current.spendingSafety.paidCloudCallsEnabled) {
+    merged.spendingSafety.paidCloudCallsEnabled = false;
+  }
+  // OpenRouter cannot be enabled through config writes or renderer input.
+  merged.spendingSafety.openRouterEnabled = false;
+  await fs.writeFile(configPath, JSON.stringify(merged, null, 2));
+  return merged;
+}
+
+export async function getSpendingSafety() {
+  const config = await readConfig();
+  return spendGuard.status(config.spendingSafety);
+}
+
+export async function updateSpendingSafety(body = {}) {
+  const current = await readConfig();
+  const requestedEnabled = body.paidCloudCallsEnabled === true;
+  if (requestedEnabled && !current.spendingSafety.paidCloudCallsEnabled
+      && body.confirmation !== "ENABLE PAID CLOUD CALLS") {
+    const error = new Error("Type ENABLE PAID CLOUD CALLS to unlock metered provider requests.");
+    error.status = 400;
+    throw error;
+  }
+  if (requestedEnabled && !current.spendingSafety.paidCloudCallsEnabled
+      && body.providerLimitConfirmed !== true) {
+    const error = new Error("Confirm that an account-side provider spending limit or free-quota-only block is enabled.");
+    error.status = 400;
+    throw error;
+  }
+  const spendingSafety = sanitizeSpendingSafety({
+    ...current.spendingSafety,
+    ...body,
+    paidCloudCallsEnabled: requestedEnabled
+  });
+  if (requestedEnabled && (spendingSafety.dailyBudgetUsd <= 0 || spendingSafety.perRequestBudgetUsd <= 0)) {
+    const error = new Error("Paid calls require non-zero daily and per-request budgets.");
+    error.status = 400;
+    throw error;
+  }
+  await writeConfig({ ...current, spendingSafety }, { allowPaidEnable: requestedEnabled });
+  return getSpendingSafety();
 }
 
 async function readJsonFile(filePath, fallback) {
@@ -576,14 +700,7 @@ function messagesPath(threadId) {
 
 async function readProjects() {
   const projects = await readJsonFile(projectsPath, [defaultProject()].filter(Boolean));
-  const fallback = defaultProjectPath();
-  return projects.map((project) => {
-    const normalized = String(project.path || "");
-    if (project.id === "project_desktop_client" && normalized.includes(`${path.sep}release${path.sep}`)) {
-      return { ...project, name: stableProjectName(fallback), path: fallback };
-    }
-    return project;
-  });
+  return projects.filter((project) => !isInstallationArtifactProject(project));
 }
 
 async function writeProjects(projects) {
@@ -591,7 +708,7 @@ async function writeProjects(projects) {
 }
 
 async function readThreads() {
-  return readJsonFile(threadsPath, [defaultThread()]);
+  return readJsonFile(threadsPath, []);
 }
 
 async function writeThreads(threads) {
@@ -623,11 +740,62 @@ async function writeLoops(loops) {
 }
 
 async function readObjectives() {
-  return readJsonFile(objectivesPath, []);
+  const objectives = await readJsonFile(objectivesPath, []);
+  if (!objectives.some((objective) => Number(objective.control?.policyVersion || 0) < 1)) return objectives;
+  const config = await readConfig();
+  const upgraded = objectives.map((objective) => {
+    if (Number(objective.control?.policyVersion || 0) >= 1) return objective;
+    const flags = classifyIdea(objective.idea || objective.spec?.objective || objective.title);
+    return {
+      ...objective,
+      agents: buildAgentPlan(config, flags),
+      control: buildObjectiveControl(config, flags),
+      updatedAt: nowIso()
+    };
+  });
+  await fs.writeFile(objectivesPath, JSON.stringify(upgraded, null, 2));
+  return upgraded;
 }
 
 async function writeObjectives(objectives) {
   return writeJsonFile(objectivesPath, objectives);
+}
+
+/**
+ * Append-only control-plane history. Events deliberately contain routing and
+ * lifecycle metadata only: prompts, clarity answers, file contents, and
+ * credentials belong in their existing protected stores, not the audit log.
+ */
+async function appendObjectiveEvent(objectiveId, type, metadata = {}) {
+  await ensureDataFiles();
+  const event = {
+    id: makeId("objective_event"),
+    objectiveId,
+    type,
+    actor: metadata.actor || "system",
+    taskId: metadata.taskId || null,
+    runId: metadata.runId || null,
+    providerId: metadata.providerId || null,
+    model: metadata.model || null,
+    status: metadata.status || null,
+    note: metadata.note ? String(metadata.note).slice(0, 300) : null,
+    at: nowIso()
+  };
+  await fs.appendFile(objectiveEventsPath, `${JSON.stringify(event)}\n`);
+  return event;
+}
+
+async function readObjectiveEvents(objectiveId, limit = 250) {
+  await ensureDataFiles();
+  const raw = await fs.readFile(objectiveEventsPath, "utf8").catch(() => "");
+  return raw.split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      try { return JSON.parse(line); } catch { return null; }
+    })
+    .filter((event) => event?.objectiveId === objectiveId)
+    .slice(-Math.max(1, Math.min(1000, Number(limit) || 250)))
+    .reverse();
 }
 
 async function saveLoop(loop) {
@@ -744,12 +912,26 @@ export async function addProject(input) {
   return { project, projects: nextProjects };
 }
 
-export async function createThread(input) {
+export async function createThread(input, { hasTranscript = () => false } = {}) {
   const projects = await readProjects();
   const projectId = String(input?.projectId ?? projects[0]?.id ?? "").trim();
   const project = projects.find((item) => item.id === projectId) || projects[0];
   if (!project) {
     throw new Error("Create or select a project first.");
+  }
+
+  const threads = await readThreads();
+  const reusable = threads
+    .filter((item) => item.projectId === project.id && isGenericThreadTitle(item.title))
+    .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0));
+  for (const candidate of reusable) {
+    const [messages, transcript] = await Promise.all([
+      readMessages(candidate.id),
+      Promise.resolve(hasTranscript(candidate.id)).catch(() => false)
+    ]);
+    if (messages.length === 0 && !(Array.isArray(transcript) ? transcript.length : transcript)) {
+      return { thread: candidate, reused: true };
+    }
   }
 
   const title = String(input?.title ?? "").trim() || `New chat in ${project.name}`;
@@ -762,10 +944,9 @@ export async function createThread(input) {
     createdAt: nowIso(),
     updatedAt: nowIso()
   };
-  const threads = await readThreads();
   await writeThreads([thread, ...threads]);
   await writeMessages(thread.id, []);
-  return { thread };
+  return { thread, reused: false };
 }
 
 export async function getThreadBundle(threadId) {
@@ -793,10 +974,188 @@ export async function getThreadBundle(threadId) {
   };
 }
 
+function isInstallationArtifactProject(project) {
+  const normalized = String(project?.path || "").replaceAll("/", "\\").toLowerCase();
+  return normalized.endsWith("\\resources\\app.asar")
+    || normalized.includes("\\program files\\phoenixai\\resources\\app.asar")
+    || (project?.id === "project_desktop_client" && normalized.includes("\\release\\"));
+}
+
+function isGenericThreadTitle(title) {
+  return /^(new chat(?: in .+)?|untitled)$/i.test(String(title || "").trim());
+}
+
+function titleFromPrompt(text) {
+  const clean = String(text || "").replace(/^\/[a-z-]+\s*/i, "").replace(/\s+/g, " ").trim();
+  if (!clean) return "New chat";
+  const firstSentence = clean.split(/(?<=[.!?])\s/)[0] || clean;
+  if (firstSentence.length <= 64) return firstSentence;
+  const clipped = firstSentence.slice(0, 61).replace(/\s+\S*$/, "").trimEnd();
+  return `${clipped || firstSentence.slice(0, 61).trimEnd()}…`;
+}
+
+async function backupWorkspaceMigration(payload) {
+  if (!(payload.projects?.length || payload.threads?.length)) return;
+  const backupPath = path.join(dataDir, "workspace-migration-backup.json");
+  let existing = { migrations: [] };
+  try { existing = parseJsonText(await fs.readFile(backupPath, "utf8"), existing); }
+  catch (error) { if (error?.code !== "ENOENT") throw error; }
+  await fs.writeFile(backupPath, JSON.stringify({
+    migrations: [...(existing.migrations ?? []), { at: nowIso(), ...payload }].slice(-20)
+  }, null, 2));
+}
+
+/** Remove invalid install-directory projects and duplicate truly-empty chats. */
+export async function cleanupWorkspaceState({ hasTranscript = () => false } = {}) {
+  const [rawProjects, threads] = await Promise.all([
+    readJsonFile(projectsPath, []),
+    readJsonFile(threadsPath, [])
+  ]);
+  const removedProjects = rawProjects.filter(isInstallationArtifactProject);
+  const removedProjectIds = new Set(removedProjects.map((project) => project.id));
+  const validProjects = rawProjects.filter((project) => !removedProjectIds.has(project.id));
+  const validProjectIds = new Set(validProjects.map((project) => project.id));
+  const removedThreads = threads.filter((thread) => !validProjectIds.has(thread.projectId));
+  const candidates = threads.filter((thread) => validProjectIds.has(thread.projectId));
+
+  for (const project of validProjects) {
+    const generic = candidates
+      .filter((thread) => thread.projectId === project.id && isGenericThreadTitle(thread.title))
+      .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0));
+    let keptEmpty = false;
+    for (const thread of generic) {
+      const [messages, transcript] = await Promise.all([
+        readMessages(thread.id),
+        Promise.resolve(hasTranscript(thread.id)).catch(() => false)
+      ]);
+      const empty = messages.length === 0 && !(Array.isArray(transcript) ? transcript.length : transcript);
+      if (!empty) continue;
+      if (!keptEmpty) keptEmpty = true;
+      else removedThreads.push(thread);
+    }
+  }
+
+  const removedThreadIds = new Set(removedThreads.map((thread) => thread.id));
+  const nextThreads = threads.filter((thread) => !removedThreadIds.has(thread.id));
+  if (removedProjects.length || removedThreads.length) {
+    await backupWorkspaceMigration({ projects: removedProjects, threads: removedThreads });
+    await Promise.all([writeProjects(validProjects), writeThreads(nextThreads)]);
+    await Promise.all([...removedThreadIds].map((threadId) =>
+      fs.unlink(messagesPath(threadId)).catch((error) => { if (error?.code !== "ENOENT") throw error; })));
+  }
+  return { removedProjectIds: [...removedProjectIds], removedThreadIds: [...removedThreadIds] };
+}
+
+export async function noteThreadPrompt(threadId, text) {
+  const threads = await readThreads();
+  const index = threads.findIndex((thread) => thread.id === threadId);
+  if (index < 0) return null;
+  const current = threads[index];
+  const patch = {
+    summary: `${current.summary?.split("\nRecent user intent:")[0] || "Local agent conversation."}\nRecent user intent: ${String(text || "").slice(0, 400)}`
+  };
+  if (isGenericThreadTitle(current.title)) patch.title = titleFromPrompt(text);
+  const updated = { ...current, ...patch, updatedAt: nowIso() };
+  threads[index] = updated;
+  await writeThreads(threads);
+  return updated;
+}
+
+export async function renameThread(threadId, title) {
+  const clean = String(title ?? "").trim().slice(0, 120);
+  if (!clean) throw new Error("Thread title is required.");
+  const threads = await readThreads();
+  const index = threads.findIndex((item) => item.id === threadId);
+  if (index < 0) {
+    const error = new Error(`Thread not found: ${threadId}`);
+    error.status = 404;
+    throw error;
+  }
+  const thread = { ...threads[index], title: clean, updatedAt: nowIso() };
+  threads[index] = thread;
+  await writeThreads(threads);
+  return { thread };
+}
+
+export async function deleteThread(threadId) {
+  const threads = await readThreads();
+  const thread = threads.find((item) => item.id === threadId);
+  if (!thread) {
+    const error = new Error(`Thread not found: ${threadId}`);
+    error.status = 404;
+    throw error;
+  }
+  await Promise.all([
+    writeThreads(threads.filter((item) => item.id !== threadId)),
+    fs.unlink(messagesPath(threadId)).catch((error) => {
+      if (error?.code !== "ENOENT") throw error;
+    })
+  ]);
+  return { deleted: true, threadId };
+}
+
+async function trustedThreadProject(threadId) {
+  const bundle = await getThreadBundle(threadId);
+  if (!bundle?.thread || bundle.thread.id !== threadId || !bundle.project?.path) {
+    const error = new Error("Thread project not found.");
+    error.status = 404;
+    throw error;
+  }
+  return fs.realpath(bundle.project.path);
+}
+
+export async function readThreadProjectFile(threadId, relativePath) {
+  const root = await trustedThreadProject(threadId);
+  const requested = String(relativePath ?? "").replaceAll("\\", "/");
+  if (!requested || path.isAbsolute(requested)) {
+    const error = new Error("A relative project file path is required.");
+    error.status = 400;
+    throw error;
+  }
+  const target = await fs.realpath(path.resolve(root, requested)).catch(() => null);
+  const relative = target ? path.relative(root, target) : "..";
+  if (!target || relative.startsWith("..") || path.isAbsolute(relative)) {
+    const error = new Error("File is outside the selected project.");
+    error.status = 403;
+    throw error;
+  }
+  const stat = await fs.stat(target);
+  if (!stat.isFile() || stat.size > 1024 * 1024) {
+    const error = new Error("Only text files up to 1 MB can be previewed.");
+    error.status = 413;
+    throw error;
+  }
+  const bytes = await fs.readFile(target);
+  if (bytes.subarray(0, 8000).includes(0)) {
+    const error = new Error("Binary files cannot be previewed as text.");
+    error.status = 415;
+    throw error;
+  }
+  return { path: requested, size: stat.size, content: bytes.toString("utf8") };
+}
+
+export async function getThreadProjectDiff(threadId) {
+  const root = await trustedThreadProject(threadId);
+  const [status, stat, diff] = await Promise.all([
+    runCommand("git", ["-C", root, "status", "--short", "--untracked-files=all"], { timeoutMs: 12_000 }),
+    runCommand("git", ["-C", root, "diff", "--stat", "HEAD", "--"], { timeoutMs: 12_000 }),
+    runCommand("git", ["-C", root, "diff", "--no-ext-diff", "HEAD", "--"], { timeoutMs: 25_000 })
+  ]);
+  const text = String(diff.stdout || diff.stderr || "");
+  return {
+    status: status.stdout || status.stderr || "",
+    stat: stat.stdout || stat.stderr || "",
+    diff: text.slice(0, 250_000),
+    truncated: text.length > 250_000
+  };
+}
+
 async function buildProjectContext(project) {
   if (!project?.path) {
     return {
       gitRepo: false,
+      branch: null,
+      dirty: false,
       gitStatus: "No project selected.",
       files: [],
       cleanup: cleanupFindings("", []),
@@ -809,6 +1168,8 @@ async function buildProjectContext(project) {
   if (!stat?.isDirectory()) {
     return {
       gitRepo: false,
+      branch: null,
+      dirty: false,
       gitStatus: `Project path is not available: ${projectPath}`,
       files: [],
       cleanup: cleanupFindings("", []),
@@ -823,6 +1184,9 @@ async function buildProjectContext(project) {
   const gitStatus = gitRepo
     ? await gitText(repoRoot || projectPath, ["status", "--short", "--untracked-files=all", ...scopedArgs], 8000)
     : "";
+  const branch = gitRepo
+    ? await gitText(repoRoot || projectPath, ["rev-parse", "--abbrev-ref", "HEAD"], 3000)
+    : "";
   const trackedFiles = gitRepo
     ? (await gitText(repoRoot || projectPath, ["ls-files", ...scopedArgs], 8000))
       .split(/\r?\n/)
@@ -835,6 +1199,8 @@ async function buildProjectContext(project) {
   const cleanup = cleanupFindings(gitStatus, files);
   return {
     gitRepo,
+    branch: branch.trim() || null,
+    dirty: Boolean(gitStatus.trim()),
     gitStatus: gitStatus || (gitRepo ? "Clean or no tracked status output." : "Not a git repository."),
     files,
     cleanup,
@@ -902,6 +1268,14 @@ async function buildContextPack({ thread, project, messages, config, activeGoal,
     messageCount: messages.length,
     includedMessages: recentMessages.length,
     projectFileCount: projectContext.files.length,
+    files: projectContext.files,
+    project: {
+      path: project?.path || null,
+      gitRepo: projectContext.gitRepo,
+      branch: projectContext.branch,
+      dirty: projectContext.dirty,
+      gitStatus: projectContext.gitStatus
+    },
     cleanup: projectContext.cleanup,
     approximateTokens: Math.ceil(contextText.length / 4),
     text: contextText
@@ -1185,6 +1559,15 @@ export async function mergeRunToSource(input = {}) {
     status: run.status === "failed" ? run.status : "merged"
   });
   const objective = await markObjectiveTaskMerged(run, mergeGate, archiveResult);
+  if (run.objectiveId) {
+    await appendObjectiveEvent(run.objectiveId, "merge.approved", {
+      actor: "user",
+      taskId: run.objectiveTaskId,
+      runId: run.id,
+      status: "merged",
+      note: "Managed worktree diff applied to source project."
+    });
+  }
   return { run: publicRun(run), gate: mergeGate, objective };
 }
 
@@ -1209,7 +1592,7 @@ function runCommand(command, args, options = {}) {
       cwd: options.cwd,
       windowsHide: true,
       shell: false,
-      env: process.env
+      env: options.env ?? process.env
     });
     let stdout = "";
     let stderr = "";
@@ -1217,10 +1600,10 @@ function runCommand(command, args, options = {}) {
       child.kill();
     }, options.timeoutMs || 20000);
     child.stdout?.on("data", (chunk) => {
-      stdout += chunk.toString("utf8");
+      if (stdout.length < (options.maxOutputBytes ?? Infinity)) stdout += chunk.toString("utf8");
     });
     child.stderr?.on("data", (chunk) => {
-      stderr += chunk.toString("utf8");
+      if (stderr.length < (options.maxOutputBytes ?? Infinity)) stderr += chunk.toString("utf8");
     });
     child.on("error", (error) => {
       clearTimeout(timeout);
@@ -1231,6 +1614,195 @@ function runCommand(command, args, options = {}) {
       resolve({ ok: code === 0, command: [command, ...args].join(" "), stdout, stderr, exitCode: code, ms: Date.now() - startedAt });
     });
   });
+}
+
+export async function searchThreadProject(threadId, input = {}) {
+  const root = await trustedThreadProject(threadId);
+  const query = String(input.query ?? "").trim();
+  if (!query || query.length > 200) {
+    const error = new Error("Search text must be between 1 and 200 characters.");
+    error.status = 400;
+    throw error;
+  }
+  const result = await runCommand("rg", [
+    "--json", "--line-number", "--max-count", "200", "--hidden",
+    "--glob", "!.git/**", "--fixed-strings", "--", query, "."
+  ], {
+    cwd: root,
+    timeoutMs: 15_000,
+    maxOutputBytes: 2 * 1024 * 1024,
+    env: safeChildEnv()
+  });
+  if (!result.ok && result.exitCode !== 1) throw new Error(result.stderr || "Project search failed.");
+  const matches = [];
+  for (const line of result.stdout.split(/\r?\n/)) {
+    if (!line) continue;
+    try {
+      const row = JSON.parse(line);
+      if (row.type !== "match") continue;
+      matches.push({
+        path: String(row.data?.path?.text ?? "").replace(/^\.[/\\]/, "").replaceAll("\\", "/"),
+        line: row.data?.line_number ?? null,
+        text: String(row.data?.lines?.text ?? "").trimEnd().slice(0, 500)
+      });
+    } catch { /* rg diagnostics are ignored */ }
+    if (matches.length >= 200) break;
+  }
+  return { query, matches, truncated: matches.length >= 200 };
+}
+
+export async function runThreadProjectCommand(threadId, input = {}) {
+  const root = await trustedThreadProject(threadId);
+  const command = String(input.command ?? "").trim();
+  if (!command || command.length > 4000) {
+    const error = new Error("Command must be between 1 and 4000 characters.");
+    error.status = 400;
+    throw error;
+  }
+  const shell = process.platform === "win32"
+    ? { command: process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe", args: ["/d", "/s", "/c", command] }
+    : { command: process.env.SHELL || "/bin/sh", args: ["-lc", command] };
+  const result = await runCommand(shell.command, shell.args, {
+    cwd: root,
+    timeoutMs: Math.min(120_000, Math.max(1_000, Number(input.timeoutMs) || 30_000)),
+    maxOutputBytes: 1024 * 1024,
+    env: safeChildEnv({ NO_COLOR: "1" })
+  });
+  return {
+    command,
+    cwd: root,
+    ok: result.ok,
+    exitCode: result.exitCode,
+    stdout: result.stdout.slice(0, 1024 * 1024),
+    stderr: result.stderr.slice(0, 1024 * 1024),
+    ms: result.ms
+  };
+}
+
+export async function listThreadProjectSkills(threadId) {
+  const root = await trustedThreadProject(threadId);
+  const result = await runCommand("rg", ["--files", "--hidden", "--glob", "!.git/**", "--glob", "**/SKILL.md"], {
+    cwd: root, timeoutMs: 10_000, maxOutputBytes: 512 * 1024, env: safeChildEnv()
+  });
+  if (!result.ok && result.exitCode !== 1) throw new Error(result.stderr || "Skill discovery failed.");
+  return {
+    skills: result.stdout.split(/\r?\n/).filter(Boolean).slice(0, 200).map((file) => ({ file: file.replaceAll("\\", "/") }))
+  };
+}
+
+function parseNullList(text) {
+  return String(text ?? "").split("\0").filter(Boolean);
+}
+
+export async function createThreadCheckpoint(threadId, input = {}) {
+  const root = await trustedThreadProject(threadId);
+  if (!await isGitRepo(root)) throw new Error("Checkpoints require a Git project.");
+  const id = makeId("checkpoint");
+  const folder = path.join(checkpointsDir, id);
+  await fs.mkdir(path.join(folder, "untracked"), { recursive: true });
+  const [status, diff, untracked] = await Promise.all([
+    runCommand("git", ["-C", root, "status", "--short", "--untracked-files=all"], { timeoutMs: 12_000 }),
+    runCommand("git", ["-C", root, "diff", "--binary", "HEAD", "--"], { timeoutMs: 30_000, maxOutputBytes: 20 * 1024 * 1024 }),
+    runCommand("git", ["-C", root, "ls-files", "--others", "--exclude-standard", "-z"], { timeoutMs: 12_000, maxOutputBytes: 2 * 1024 * 1024 })
+  ]);
+  if (!status.ok || !diff.ok || !untracked.ok) throw new Error(status.stderr || diff.stderr || untracked.stderr || "Could not create checkpoint.");
+  const files = [];
+  let totalBytes = 0;
+  for (const relativePath of parseNullList(untracked.stdout).slice(0, 1000)) {
+    const source = await fs.realpath(path.resolve(root, relativePath)).catch(() => null);
+    if (!source || !pathInside(root, source)) continue;
+    const stat = await fs.stat(source).catch(() => null);
+    if (!stat?.isFile()) continue;
+    totalBytes += stat.size;
+    if (totalBytes > 100 * 1024 * 1024) throw new Error("Untracked checkpoint files exceed the 100 MB safety limit.");
+    const destination = path.join(folder, "untracked", relativePath);
+    await fs.mkdir(path.dirname(destination), { recursive: true });
+    await fs.copyFile(source, destination);
+    files.push({ path: relativePath.replaceAll("\\", "/"), size: stat.size });
+  }
+  await fs.writeFile(path.join(folder, "changes.patch"), diff.stdout, "utf8");
+  const checkpoint = {
+    id,
+    threadId,
+    projectPath: root,
+    name: String(input.name ?? "").trim().slice(0, 100) || `Checkpoint ${new Date().toLocaleString()}`,
+    createdAt: nowIso(),
+    status: status.stdout,
+    patchBytes: Buffer.byteLength(diff.stdout),
+    untrackedFiles: files
+  };
+  await fs.writeFile(path.join(folder, "metadata.json"), JSON.stringify(checkpoint, null, 2));
+  return { checkpoint };
+}
+
+function pathInside(root, target) {
+  const relative = path.relative(root, target);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+export async function listThreadCheckpoints(threadId) {
+  const root = await trustedThreadProject(threadId);
+  const entries = await fs.readdir(checkpointsDir, { withFileTypes: true }).catch(() => []);
+  const checkpoints = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    try {
+      const row = JSON.parse(await fs.readFile(path.join(checkpointsDir, entry.name, "metadata.json"), "utf8"));
+      if (row.projectPath === root) checkpoints.push(row);
+    } catch { /* incomplete checkpoint */ }
+  }
+  checkpoints.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  return { checkpoints };
+}
+
+export async function restoreThreadCheckpoint(threadId, checkpointId) {
+  const root = await trustedThreadProject(threadId);
+  const safeId = String(checkpointId ?? "");
+  if (!/^checkpoint_[A-Za-z0-9_-]+$/.test(safeId)) throw new Error("Invalid checkpoint id.");
+  const folder = path.join(checkpointsDir, safeId);
+  const checkpoint = JSON.parse(await fs.readFile(path.join(folder, "metadata.json"), "utf8"));
+  if (checkpoint.projectPath !== root) {
+    const error = new Error("Checkpoint belongs to another project.");
+    error.status = 403;
+    throw error;
+  }
+  const current = await runCommand("git", ["-C", root, "status", "--short", "--untracked-files=all"], { timeoutMs: 12_000 });
+  if (current.stdout.trim()) {
+    const error = new Error("Restore requires a clean working tree. Create a checkpoint, then commit or clean the current changes first.");
+    error.status = 409;
+    throw error;
+  }
+  const patchPath = path.join(folder, "changes.patch");
+  if ((await fs.stat(patchPath)).size > 0) {
+    const applied = await runCommand("git", ["-C", root, "apply", "--3way", patchPath], { timeoutMs: 30_000 });
+    if (!applied.ok) throw new Error(applied.stderr || "Checkpoint patch could not be applied cleanly.");
+  }
+  for (const file of checkpoint.untrackedFiles ?? []) {
+    const destination = path.resolve(root, file.path);
+    if (!pathInside(root, destination)) continue;
+    await fs.mkdir(path.dirname(destination), { recursive: true });
+    await fs.copyFile(path.join(folder, "untracked", file.path), destination);
+  }
+  return { restored: true, checkpoint };
+}
+
+export async function getDiagnostics() {
+  const config = await readConfig();
+  const packageInfo = JSON.parse(await fs.readFile(path.join(rootDir, "package.json"), "utf8"));
+  return {
+    generatedAt: nowIso(),
+    app: { name: "PhoenixAI", version: packageInfo.version ?? "unknown" },
+    runtime: { node: process.versions.node, electron: process.versions.electron ?? null, platform: process.platform, arch: process.arch },
+    configuration: {
+      activeProviderId: config.activeProviderId ?? null,
+      activeModel: config.activeModel ?? null,
+      approvalMode: config.approvalMode ?? "ask",
+      reasoningEffort: config.reasoningEffort ?? null
+    },
+    providers: getProviderStatus().providers.map(({ id, name, configured, defaultModel, baseUrl }) => ({ id, name, configured, defaultModel, baseUrl })),
+    tools: await getToolsStatus(),
+    privacy: { telemetryEnabled: false, includesPrompts: false, includesSecretValues: false }
+  };
 }
 
 async function isGitRepo(projectPath) {
@@ -1254,8 +1826,8 @@ function shortHash(value) {
   return crypto.createHash("sha1").update(String(value || "")).digest("hex").slice(0, 10);
 }
 
-function worktreeObjectiveKey({ projectPath, threadId, title, prompt }) {
-  const source = String(title || prompt || threadId || "agent-objective").trim();
+function worktreeObjectiveKey({ projectPath, threadId, title, prompt, objectiveKey }) {
+  const source = String(objectiveKey || title || prompt || threadId || "agent-objective").trim();
   return `${slugify(source)}-${shortHash(`${pathKey(projectPath)}:${threadId || source}`)}`;
 }
 
@@ -1330,7 +1902,8 @@ export async function ensureWorktreeLease(input = {}) {
     projectPath: sourceProjectPath,
     threadId: input.threadId,
     title: input.title,
-    prompt: input.prompt
+    prompt: input.prompt,
+    objectiveKey: input.objectiveKey
   });
   const projectKey = worktreeProjectKey(sourceProjectPath);
   const leasePath = path.join(worktreesRoot, projectKey, objectiveKey);
@@ -1410,6 +1983,123 @@ export async function archiveWorktreeLease(leaseId) {
   };
   await writeWorktreeLeases([updated, ...leases.filter((item) => item.id !== leaseId)]);
   return { lease: publicLease(await hydrateLease(updated)) };
+}
+
+async function strategyProjectForInput(input = {}) {
+  const projects = await readProjects();
+  const assertedPath = input.projectPath ? path.resolve(String(input.projectPath)) : null;
+  const project = input.projectId
+    ? projects.find((item) => item.id === input.projectId)
+    : assertedPath ? projects.find((item) => pathKey(item.path) === pathKey(assertedPath)) : null;
+  if (!project?.path) throw new Error("Select a registered project before using Strategy Lab.");
+  if (assertedPath && pathKey(project.path) !== pathKey(assertedPath)) {
+    const error = new Error("Strategy Lab project path does not match the registered project.");
+    error.status = 409;
+    throw error;
+  }
+  const stat = await fs.stat(project.path).catch(() => null);
+  if (!stat?.isDirectory()) throw new Error("The selected Strategy Lab project folder is unavailable.");
+  return { id: project.id, name: project.name, path: path.resolve(project.path) };
+}
+
+export async function getStrategyLabState(input = {}) {
+  const project = await strategyProjectForInput(input);
+  const [specs, datasets, experiments] = await Promise.all([
+    strategyLab.listSpecs(project.id),
+    strategyLab.listDatasets(project.id),
+    strategyLab.listExperiments(project.id)
+  ]);
+  return {
+    project,
+    safety: { mode: "research-only", liveTrading: "disabled", orderPlacement: "disabled" },
+    specs,
+    datasets,
+    experiments,
+    comparison: await strategyLab.compareExperiments(project.id)
+  };
+}
+
+export async function createStrategySpec(input = {}) {
+  const project = await strategyProjectForInput(input);
+  return { spec: await strategyLab.createSpec(input, project) };
+}
+
+export async function createStrategySpecVersion(input = {}) {
+  const project = await strategyProjectForInput(input);
+  return { spec: await strategyLab.createSpecVersion(input.specId, input, project) };
+}
+
+export async function inspectStrategyDataset(input = {}) {
+  const project = await strategyProjectForInput(input);
+  return { dataset: await strategyLab.inspectDataset(input, project) };
+}
+
+export async function recordStrategyExperiment(input = {}) {
+  const project = await strategyProjectForInput(input);
+  return { experiment: await strategyLab.recordExperiment(input, project) };
+}
+
+export async function compareStrategyExperiments(input = {}) {
+  const project = await strategyProjectForInput(input);
+  const ids = String(input.ids || "").split(",").map((item) => item.trim()).filter(Boolean).slice(0, 20);
+  return { comparison: await strategyLab.compareExperiments(project.id, ids) };
+}
+
+export function getMarketDataStatus() {
+  return publicMarketData.status();
+}
+
+export async function getMarketQuotes(input = {}) {
+  return publicMarketData.quotes(input);
+}
+
+export async function getOptionExpirations(input = {}) {
+  return publicMarketData.optionExpirations(input);
+}
+
+export async function getOptionChain(input = {}) {
+  return publicMarketData.optionChain(input);
+}
+
+export async function getOptionGreeks(input = {}) {
+  return publicMarketData.optionGreeks(input);
+}
+
+export async function getMarketBars(input = {}) {
+  return publicMarketData.bars(input);
+}
+
+export async function getResearchOperationsState(input = {}) {
+  const project = await strategyProjectForInput(input);
+  const [alerts, signalEvents, paper] = await Promise.all([
+    researchOperations.listAlerts(project.id),
+    researchOperations.listSignalEvents(project.id),
+    researchOperations.paperState(project.id)
+  ]);
+  return { project, alerts, signalEvents, paper, marketData: publicMarketData.status(), safety: { liveTrading: false, orderPlacement: "absent", paperOnly: true } };
+}
+
+export async function createResearchAlert(input = {}) {
+  const project = await strategyProjectForInput(input);
+  return { alert: await researchOperations.createAlert(input, project) };
+}
+
+export async function scanResearchAlerts(input = {}) {
+  const project = await strategyProjectForInput(input);
+  return researchOperations.scanAlerts(project, publicMarketData);
+}
+
+export async function createPaperAccount(input = {}) {
+  const project = await strategyProjectForInput(input);
+  return { account: await researchOperations.createPaperAccount(input, project) };
+}
+
+export async function simulatePaperFill(input = {}) {
+  const project = await strategyProjectForInput(input);
+  const paper = await researchOperations.paperState(project.id);
+  if (!paper.account) throw new Error("Create a paper account before requesting market evidence for a simulated fill.");
+  const evidence = await publicMarketData.quotes({ symbol: input.symbol, type: input.type });
+  return researchOperations.simulatePaperFill(input, project, evidence);
 }
 
 function textIncludesAny(text, terms) {
@@ -1502,10 +2192,10 @@ function buildClarifyingQuestions(idea, flags) {
 }
 
 function buildAgentPlan(config, flags) {
-  const frontier = pickRoute(config, ["zai-glm", "xai", "nvidia-nim", "ollama", "lite-gateway", "kimi", "openrouter", "anthropic", "openai"], ["glm-5.2", "grok-4.3", "grok-4", "qwen3", "nemotron", "gemma4", "kimi-k2.7", "fable", "gpt-5.5"]);
-  const cheapCoder = pickRoute(config, ["nvidia-nim", "ollama", "lite-gateway", "lm-studio", "xai", "kimi", "openrouter"], ["qwen3", "gemma4", "nemotron", "coder", "grok-code", "kimi-k2.7", "free"]);
-  const reviewer = pickRoute(config, ["xai", "nvidia-nim", "ollama", "zai-glm", "kimi", "anthropic", "openai"], ["grok-4.3", "grok-4", "nemotron", "gemma4", "glm-5.2", "kimi-k2.7", "fable", "gpt-5.5"]);
-  const cheapGeneral = pickRoute(config, ["nvidia-nim", "ollama", "lite-gateway", "lm-studio", "xai", "openrouter"], ["qwen", "gemma4", "free", "gpt-oss", "nemotron", "grok-code"]);
+  const frontier = pickRoute(config, ["xai", "qwen", "kimi", "nvidia-nim", "ollama", "lite-gateway", "zai-glm", "anthropic", "openai"], ["grok-4.6", "grok-4", "qwen3.8-max", "kimi-k3", "nemotron", "gemma4"]);
+  const cheapCoder = pickRoute(config, ["kimi", "qwen", "nvidia-nim", "ollama", "lite-gateway", "lm-studio"], ["kimi-k2.7-code", "qwen3-coder", "coder", "gemma4", "nemotron"]);
+  const reviewer = pickRoute(config, ["deepseek", "qwen", "nvidia-nim", "ollama", "xai"], ["deepseek-v4-pro", "deepseek-v4", "deepseek", "qwen3.8-max", "nemotron"]);
+  const cheapGeneral = pickRoute(config, ["qwen", "nvidia-nim", "ollama", "lite-gateway", "lm-studio", "kimi"], ["qwen3.8-max", "qwen3", "qwen", "gemma4", "free", "gpt-oss", "nemotron"]);
 
   return [
     {
@@ -1517,7 +2207,8 @@ function buildAgentPlan(config, flags) {
       model: frontier.model,
       configured: frontier.configured,
       costTier: "premium-controller",
-      reason: "Use the strongest available model for product judgment, architecture, and long-context continuity."
+      routePolicy: "locked",
+      reason: "Grok Build remains the commander; this route handles bounded architecture work when a separate model call is explicitly started."
     },
     {
       id: "implementer",
@@ -1528,7 +2219,8 @@ function buildAgentPlan(config, flags) {
       model: cheapCoder.model,
       configured: cheapCoder.configured,
       costTier: "low-cost-coder",
-      reason: "Use a cheaper coding route for most implementation tokens while keeping work isolated."
+      routePolicy: "locked",
+      reason: "Prefer Kimi K2.7 Code for implementation tokens while keeping every code change isolated."
     },
     {
       id: "reviewer",
@@ -1539,7 +2231,8 @@ function buildAgentPlan(config, flags) {
       model: reviewer.model,
       configured: reviewer.configured,
       costTier: "selective-frontier",
-      reason: "Use a stronger model only at gates where a mistake would cost more than the review."
+      routePolicy: "locked",
+      reason: "Prefer DeepSeek V4 Pro as an independent adversarial reviewer at correctness gates."
     },
     {
       id: "tester",
@@ -1550,7 +2243,8 @@ function buildAgentPlan(config, flags) {
       model: cheapGeneral.model,
       configured: cheapGeneral.configured,
       costTier: "low-cost-verifier",
-      reason: "Use inexpensive routes for repetitive test interpretation and log triage."
+      routePolicy: "locked",
+      reason: "Prefer Qwen for repetitive test interpretation and evidence collection."
     },
     {
       id: "scout",
@@ -1563,9 +2257,44 @@ function buildAgentPlan(config, flags) {
       model: cheapGeneral.model,
       configured: cheapGeneral.configured,
       costTier: "cheap-research",
+      routePolicy: "locked",
       reason: "Keep exploratory research on a low-cost route."
     }
   ];
+}
+
+function buildObjectiveControl(config, flags) {
+  return {
+    policyVersion: 1,
+    operatingMode: flags.backtest ? "research" : "build",
+    commander: {
+      id: "grok-build-local",
+      name: "Grok Build",
+      execution: "subscription-session",
+      responsibility: "Own scope, decisions, delegation, arbitration, and final delivery."
+    },
+    routeEnforcement: "locked-per-agent",
+    paidCalls: config.spendingSafety?.paidCloudCallsEnabled ? "budget-gated" : "locked",
+    budgets: {
+      dailyUsd: Number(config.spendingSafety?.dailyBudgetUsd || 0),
+      perRequestUsd: Number(config.spendingSafety?.perRequestBudgetUsd || 0)
+    },
+    approvals: {
+      externalWrites: "human-required",
+      patchApply: "human-required",
+      merge: "human-required",
+      destructiveActions: "human-required"
+    },
+    execution: {
+      marketData: flags.backtest ? "offline-or-read-only" : "not-requested",
+      liveTrading: "disabled",
+      orderPlacement: "disabled"
+    },
+    limits: {
+      maxConcurrentAgents: 2,
+      maxIterations: 4
+    }
+  };
 }
 
 function buildTaskGraph({ clarityRequired, flags }) {
@@ -1949,6 +2678,7 @@ function buildObjectivePlan({ idea, project, threadId, projectId, config }) {
         "Ask before paid API-heavy runs, destructive cleanup, deployment, or live payment changes."
       ]
     },
+    control: buildObjectiveControl(config, flags),
     spec: {
       objective: objectiveSentence || `Build ${title}.`,
       targetUsers: "To be confirmed in the clarity gate.",
@@ -2076,6 +2806,12 @@ export async function getObjective(objectiveId) {
   return { objective: publicObjective(objective) };
 }
 
+export async function listObjectiveEvents(objectiveId, input = {}) {
+  const objective = (await readObjectives()).find((item) => item.id === objectiveId);
+  if (!objective) throw new Error(`Objective not found: ${objectiveId}`);
+  return { events: await readObjectiveEvents(objectiveId, input.limit) };
+}
+
 export async function planObjective(input = {}) {
   const idea = String(input.idea || input.objective || "").trim();
   if (!idea) {
@@ -2111,6 +2847,11 @@ export async function planObjective(input = {}) {
   });
   const objectives = await readObjectives();
   await writeObjectives([objective, ...objectives.filter((item) => item.id !== objective.id)].slice(0, 100));
+  await appendObjectiveEvent(objective.id, "objective.planned", {
+    actor: "user",
+    status: objective.status,
+    note: `${objective.title} · ${objective.control.operatingMode} mode`
+  });
   return { objective: publicObjective(objective) };
 }
 
@@ -2131,6 +2872,7 @@ export async function startObjectiveLoop(input = {}) {
   const startedAt = nowIso();
   const { goal, loop } = await startGoalLoop({
     threadId: objective.threadId,
+    objectiveId: objective.id,
     projectId: objective.projectId,
     projectPath: objective.projectPath,
     title: objective.title,
@@ -2138,7 +2880,8 @@ export async function startObjectiveLoop(input = {}) {
     instruction: objectiveLoopInstruction(objective),
     maxIterations: input.maxIterations || 4,
     workspaceMode: input.workspaceMode || "worktree",
-    roles: ["planner", "implementer", "reviewer", "tester"]
+    roles: ["planner", "implementer", "reviewer", "tester"],
+    roleRoutes: roleRoutesForObjective(objective)
   });
 
   const updated = {
@@ -2150,6 +2893,11 @@ export async function startObjectiveLoop(input = {}) {
     updatedAt: nowIso()
   };
   await writeObjectives([updated, ...objectives.filter((item) => item.id !== objective.id)]);
+  await appendObjectiveEvent(objective.id, "objective.loop_started", {
+    actor: "grok-build-local",
+    status: updated.status,
+    note: `Loop ${loop.id} · ${loop.maxIterations} iteration limit`
+  });
   return { objective: publicObjective(updated), goal: publicGoal(goal), loop: publicLoop(loop) };
 }
 
@@ -2186,6 +2934,11 @@ export async function resolveObjectiveClarity(input = {}) {
     updatedAt: nowIso()
   };
   await writeObjectives([updated, ...objectives.filter((item) => item.id !== objective.id)]);
+  await appendObjectiveEvent(objective.id, "objective.clarity_resolved", {
+    actor: "user",
+    status: updated.status,
+    note: "Clarity gate completed; answer text remains in the protected objective record."
+  });
   return { objective: publicObjective(updated) };
 }
 
@@ -2301,12 +3054,14 @@ async function runGoalLoop(loop) {
 
       const { run } = await startAgentRun({
         threadId: current.threadId,
+        objectiveId: current.objectiveId || null,
         title: `${current.title} - loop ${index}`,
         prompt: runPrompt,
         projectPath: current.projectPath,
         mode: current.agentMode,
         workspaceMode: current.workspaceMode,
-        roles: current.roles
+        roles: current.roles,
+        roleRoutes: current.roleRoutes
       });
 
       current = liveLoops.get(loop.id) || current;
@@ -2381,6 +3136,7 @@ export async function startGoalLoop(input = {}) {
   const loop = {
     id: makeId("loop"),
     goalId: goal.id,
+    objectiveId: input.objectiveId || null,
     threadId,
     projectId: input.projectId || goal.projectId || null,
     projectPath,
@@ -2392,6 +3148,7 @@ export async function startGoalLoop(input = {}) {
     agentMode: input.agentMode || input.mode || "swarm",
     workspaceMode: input.workspaceMode || "worktree",
     roles: Array.isArray(input.roles) && input.roles.length ? input.roles : ["planner", "implementer", "reviewer", "tester"],
+    roleRoutes: input.roleRoutes && typeof input.roleRoutes === "object" ? input.roleRoutes : {},
     status: "queued",
     iterations: [],
     createdAt: nowIso(),
@@ -2424,6 +3181,9 @@ function deriveObjectiveStatus(objective) {
     return "running";
   }
   if (tasks.some((task) => task.status === "needs_attention")) {
+    return "needs_attention";
+  }
+  if (tasks.some((task) => task.status === "awaiting_patch_approval")) {
     return "needs_attention";
   }
   if (tasks.length && tasks.every(taskIsComplete)) {
@@ -2471,7 +3231,7 @@ function blockingDependencies(objective, task) {
 
 function nextRunnableTask(objective) {
   return (objective.taskGraph || []).find((task) => (
-    !["complete", "changes_applied", "merged", "running", "starting", "needs_input"].includes(task.status)
+    !["complete", "changes_applied", "merged", "running", "starting", "needs_input", "awaiting_patch_approval"].includes(task.status)
     && blockingDependencies(objective, task).length === 0
   ));
 }
@@ -2481,6 +3241,33 @@ function roleIdsForObjectiveTask(task) {
   if (task.agentId === "reviewer") return ["reviewer"];
   if (task.agentId === "tester") return ["tester"];
   return ["planner"];
+}
+
+function routeForObjectiveTask(objective, task) {
+  const agent = (objective.agents || []).find((item) => item.id === task.agentId);
+  if (!agent?.providerId || !agent?.model) {
+    throw new Error(`No provider/model route is assigned to the ${task.agentId} lane.`);
+  }
+  if (!agent.configured) {
+    throw new Error(`${agent.providerName || agent.providerId} is assigned to ${task.agentId} but is not configured.`);
+  }
+  return {
+    [task.agentId]: {
+      providerId: agent.providerId,
+      model: agent.model,
+      locked: true
+    }
+  };
+}
+
+function roleRoutesForObjective(objective) {
+  return Object.fromEntries((objective.agents || [])
+    .filter((agent) => agent?.id && agent?.providerId && agent?.model)
+    .map((agent) => [agent.id, {
+      providerId: agent.providerId,
+      model: agent.model,
+      locked: true
+    }]));
 }
 
 function buildObjectiveTaskPrompt(objective, task) {
@@ -2567,12 +3354,20 @@ async function taskRunDiffStat(run) {
 async function monitorObjectiveTask(objectiveId, taskId, runId) {
   try {
     const finalRun = await waitForRunTerminal(runId);
+    const currentObjective = (await readObjectives()).find((item) => item.id === objectiveId);
+    const currentTask = currentObjective?.taskGraph?.find((item) => item.id === taskId);
     const runSummary = summarizeRunForLoop(finalRun);
     const patches = flattenRunPatches(finalRun);
     const diffStat = await taskRunDiffStat(finalRun);
+    const validPatch = patches.some((patch) => patch.canApply && !patch.applied);
+    const taskStatus = finalRun?.status !== "complete"
+      ? "needs_attention"
+      : currentTask?.agentId === "implementer"
+        ? (validPatch ? "awaiting_patch_approval" : (diffStat ? "complete" : "needs_attention"))
+        : "complete";
     await updateObjectiveTask(objectiveId, taskId, (task) => ({
       ...task,
-      status: finalRun?.status === "complete" ? "complete" : "needs_attention",
+      status: taskStatus,
       runStatus: finalRun?.status || "unknown",
       runSummary,
       patchCandidates: patches,
@@ -2581,7 +3376,14 @@ async function monitorObjectiveTask(objectiveId, taskId, runId) {
       diffStat,
       finishedAt: nowIso()
     }));
-    if (["reviewer", "tester"].includes((await readObjectives()).find((item) => item.id === objectiveId)?.taskGraph?.find((item) => item.id === taskId)?.agentId)) {
+    await appendObjectiveEvent(objectiveId, "task.finished", {
+      actor: "system",
+      taskId,
+      runId,
+      status: finalRun?.status || "unknown",
+      note: runSummary
+    });
+    if (["reviewer", "tester"].includes(currentTask?.agentId)) {
       await reconcileObjectiveReview({ objectiveId, sourceTaskId: taskId }).catch(() => null);
     }
   } catch (error) {
@@ -2592,6 +3394,13 @@ async function monitorObjectiveTask(objectiveId, taskId, runId) {
       runSummary: error.message,
       finishedAt: nowIso()
     }));
+    await appendObjectiveEvent(objectiveId, "task.failed", {
+      actor: "system",
+      taskId,
+      runId,
+      status: "failed",
+      note: error.message
+    });
   }
 }
 
@@ -2621,6 +3430,8 @@ export async function startObjectiveTask(input = {}) {
   if (blockedBy.length && input.force !== true) {
     throw new Error(`Complete dependencies first: ${blockedBy.join(", ")}`);
   }
+  const roleRoutes = routeForObjectiveTask(objective, task);
+  const assignedRoute = roleRoutes[task.agentId];
 
   const startingAt = nowIso();
   await updateObjectiveTask(objectiveId, taskId, {
@@ -2629,6 +3440,14 @@ export async function startObjectiveTask(input = {}) {
     startedAt: startingAt,
     runStatus: "queued",
     runSummary: null
+  });
+  await appendObjectiveEvent(objectiveId, "task.starting", {
+    actor: "grok-build-local",
+    taskId,
+    providerId: assignedRoute.providerId,
+    model: assignedRoute.model,
+    status: "starting",
+    note: task.title
   });
 
   try {
@@ -2642,7 +3461,8 @@ export async function startObjectiveTask(input = {}) {
       roles: roleIdsForObjectiveTask(task),
       objectiveId,
       objectiveTaskId: taskId,
-      patchMode: task.agentId === "implementer" ? "candidate" : "off"
+      patchMode: task.agentId === "implementer" ? "candidate" : "off",
+      roleRoutes
     });
     const updated = await updateObjectiveTask(objectiveId, taskId, (current) => ({
       ...current,
@@ -2652,6 +3472,15 @@ export async function startObjectiveTask(input = {}) {
       worktreePath: run.worktreeExecutionPath || run.worktreePath || null,
       startedAt: startingAt
     }));
+    await appendObjectiveEvent(objectiveId, "task.started", {
+      actor: task.agentId,
+      taskId,
+      runId: run.id,
+      providerId: assignedRoute.providerId,
+      model: assignedRoute.model,
+      status: run.status,
+      note: task.title
+    });
     monitorObjectiveTask(objectiveId, taskId, run.id);
     return { objective: publicObjective(updated), run: publicRun(run), task: updated.taskGraph.find((item) => item.id === taskId) };
   } catch (error) {
@@ -2662,6 +3491,14 @@ export async function startObjectiveTask(input = {}) {
       runSummary: error.message,
       finishedAt: nowIso()
     }));
+    await appendObjectiveEvent(objectiveId, "task.start_failed", {
+      actor: task.agentId,
+      taskId,
+      providerId: assignedRoute.providerId,
+      model: assignedRoute.model,
+      status: "failed",
+      note: error.message
+    });
     throw error;
   }
 }
@@ -2730,6 +3567,12 @@ export async function reconcileObjectiveReview(input = {}) {
     reviewBoard: nextReviewBoard,
     taskGraph: [...(objective.taskGraph || []), ...reworkTasks]
   });
+  await appendObjectiveEvent(objectiveId, "review.reconciled", {
+    actor: "reviewer",
+    taskId: sourceTaskId || null,
+    status: newDiscrepancies.length ? "needs_attention" : "clear",
+    note: `${newDiscrepancies.length} new discrepancies · ${reworkTasks.length} rework tasks`
+  });
   return {
     objective: publicObjective(updated),
     discrepancies: newDiscrepancies,
@@ -2768,6 +3611,13 @@ export async function applyObjectiveTaskPatch(input = {}) {
     runSummary: "Patch applied to managed worktree. Review the diff before merging.",
     updatedAt: nowIso()
   }));
+  await appendObjectiveEvent(objectiveId, "patch.applied", {
+    actor: "user",
+    taskId,
+    runId: task.runId,
+    status: "changes_applied",
+    note: `Patch ${patch.stepId}:${patch.index} applied to managed worktree`
+  });
   return { objective: publicObjective(updated), run, patch };
 }
 
@@ -2876,7 +3726,13 @@ async function executeAgentStep({ run, step, prompt }) {
   });
 
   try {
-    const result = await callRunModelWithFallbacks(run, prompt);
+    const routeRun = {
+      ...run,
+      providerId: step.providerId || run.providerId,
+      model: step.model || run.model,
+      routeLocked: step.routeLocked === true || run.routeLocked === true
+    };
+    const result = await callRunModelWithFallbacks(routeRun, prompt);
     const routeLine = `Route: ${result.provider} / ${result.model}`;
     const artifactPath = await writeRunArtifact(run.id, `${step.id}.md`, artifactMarkdown(step.name, `${routeLine}\n\n${result.text || "No text returned."}`));
     const patches = run.patchMode && run.patchMode !== "off"
@@ -2910,18 +3766,12 @@ async function executeAgentStep({ run, step, prompt }) {
 
 function runModelRoutes(run) {
   const routes = [{ providerId: run.providerId, model: run.model, reason: "selected route" }];
+  if (run.routeLocked) return routes;
   if (hasEnv("NVIDIA_API_KEY") && run.providerId !== "nvidia-nim") {
     routes.push({
       providerId: "nvidia-nim",
       model: "qwen/qwen3-next-80b-a3b-instruct",
       reason: "free NVIDIA coding fallback"
-    });
-  }
-  if (hasEnv("OPENROUTER_API_KEY") && run.providerId !== "openrouter") {
-    routes.push({
-      providerId: "openrouter",
-      model: "qwen/qwen3-coder-next",
-      reason: "low-cost OpenRouter coding fallback"
     });
   }
   return routes;
@@ -2997,6 +3847,105 @@ async function callChatWithFallbacks(config, prompt) {
   throw new Error(errors.join(" | "));
 }
 
+async function verificationCommands(projectPath) {
+  const commands = [];
+  const packageJson = await fs.readFile(path.join(projectPath, "package.json"), "utf8").then(JSON.parse).catch(() => null);
+  if (packageJson?.scripts) {
+    for (const script of ["test", "lint", "typecheck", "build"]) {
+      const body = String(packageJson.scripts[script] || "");
+      if (!body || (script === "test" && /no test specified/i.test(body))) continue;
+      commands.push(process.platform === "win32"
+        ? { name: `npm run ${script}`, command: process.env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", `npm.cmd run ${script}`] }
+        : { name: `npm run ${script}`, command: "npm", args: ["run", script] });
+      if (commands.length >= 3) break;
+    }
+    return commands;
+  }
+  if (await fs.stat(path.join(projectPath, "Cargo.toml")).catch(() => null)) {
+    return [{ name: "cargo test", command: "cargo", args: ["test"] }];
+  }
+  const pythonProject = await Promise.all(["pyproject.toml", "pytest.ini", "setup.cfg"].map((name) => fs.stat(path.join(projectPath, name)).catch(() => null)));
+  if (pythonProject.some(Boolean)) {
+    const executable = process.platform === "win32" ? "python.exe" : "python3";
+    return [{ name: "python -m pytest", command: executable, args: ["-m", "pytest"] }];
+  }
+  return [];
+}
+
+async function executeVerificationChecks(run) {
+  const step = run.steps.find((item) => item.id === "verification");
+  if (!step) return "No deterministic verification step was requested.";
+  const commands = await verificationCommands(run.projectPath);
+  if (!commands.length) {
+    const output = "No supported test, lint, typecheck, or build command was detected. Manual verification is required.";
+    await updateAgentRun(run.id, {
+      steps: run.steps.map((item) => item.id === step.id ? { ...item, status: "failed", startedAt: nowIso(), finishedAt: nowIso(), output, error: output } : item)
+    });
+    return output;
+  }
+  const results = [];
+  for (const entry of commands) {
+    const result = await runCommand(entry.command, entry.args, {
+      cwd: run.projectPath,
+      timeoutMs: 180000,
+      maxOutputBytes: 160000,
+      env: safeChildEnv({ CI: "1", NO_COLOR: "1" })
+    });
+    results.push({
+      name: entry.name,
+      ok: result.ok,
+      exitCode: result.exitCode,
+      ms: result.ms,
+      stdout: result.stdout,
+      stderr: result.stderr
+    });
+    if (!result.ok) break;
+  }
+  const evidence = results.map((result) => [
+    `${result.ok ? "PASS" : "FAIL"} ${result.name} (exit ${result.exitCode}, ${result.ms} ms)`,
+    result.stdout,
+    result.stderr
+  ].filter(Boolean).join("\n")).join("\n\n");
+  const artifactPath = await writeRunArtifact(run.id, "verification.md", artifactMarkdown("Deterministic Verification", evidence));
+  const failed = results.some((result) => !result.ok);
+  const current = liveRuns.get(run.id) || run;
+  await updateAgentRun(run.id, {
+    verification: { status: failed ? "failed" : "passed", results, artifactPath },
+    steps: current.steps.map((item) => item.id === step.id ? {
+      ...item,
+      status: failed ? "failed" : "complete",
+      startedAt: item.startedAt || nowIso(),
+      finishedAt: nowIso(),
+      output: evidence,
+      error: failed ? "One or more deterministic checks failed." : null,
+      artifactPath
+    } : item)
+  });
+  return evidence;
+}
+
+async function projectSourceExcerpts(projectPath, files, maxBytes = 70000) {
+  const preferred = filterContextFiles(files).filter((file) => (
+    /(^|\/)(package\.json|pyproject\.toml|cargo\.toml|readme[^/]*|src|server|app|lib|test|tests)(\/|$)/i.test(file.replaceAll("\\", "/"))
+    || /\.(js|jsx|ts|tsx|py|rs|go|java|cs|json|toml|ya?ml|md|css|html)$/i.test(file)
+  ));
+  const chunks = [];
+  let used = 0;
+  for (const file of preferred.slice(0, 40)) {
+    const target = path.resolve(projectPath, file);
+    if (!pathInside(projectPath, target)) continue;
+    const stat = await fs.stat(target).catch(() => null);
+    if (!stat?.isFile() || stat.size > 160000 || used >= maxBytes) continue;
+    const bytes = await fs.readFile(target).catch(() => null);
+    if (!bytes || bytes.subarray(0, 8000).includes(0)) continue;
+    const content = bytes.toString("utf8").slice(0, Math.min(16000, maxBytes - used));
+    if (!content.trim()) continue;
+    chunks.push(`--- ${file.replaceAll("\\", "/")} ---\n${content}`);
+    used += content.length;
+  }
+  return chunks.join("\n\n");
+}
+
 async function runAgentPipeline(run) {
   try {
     const projectPath = run.projectPath;
@@ -3007,7 +3956,14 @@ async function runAgentPipeline(run) {
     const files = gitRepo
       ? (await runCommand("git", ["-C", projectPath, "ls-files"], { timeoutMs: 12000 })).stdout.split(/\r?\n/).filter(Boolean).slice(0, 220)
       : await listProjectFiles(projectPath);
+    const gitDiff = gitRepo
+      ? await runCommand("git", ["-C", projectPath, "diff", "--no-ext-diff", "--unified=3", "HEAD", "--"], { timeoutMs: 20000, maxOutputBytes: 120000 })
+      : { ok: false, stdout: "", stderr: "Not a git repository." };
+    const gitDiffStat = gitRepo
+      ? await runCommand("git", ["-C", projectPath, "diff", "--stat", "HEAD", "--"], { timeoutMs: 12000 })
+      : { ok: false, stdout: "", stderr: "" };
     const cleanup = cleanupFindings(gitStatus.stdout, files);
+    const sourceExcerpts = await projectSourceExcerpts(projectPath, files);
     const snapshot = {
       sourceProjectPath: run.sourceProjectPath || projectPath,
       executionPath: projectPath,
@@ -3016,6 +3972,8 @@ async function runAgentPipeline(run) {
       worktreePath: run.worktreePath || null,
       gitRepo,
       gitStatus: gitStatus.stdout || gitStatus.stderr,
+      gitDiffStat: gitDiffStat.stdout || gitDiffStat.stderr,
+      gitDiffPreview: gitDiff.stdout || gitDiff.stderr,
       files,
       cleanup
     };
@@ -3041,10 +3999,18 @@ async function runAgentPipeline(run) {
       `Workspace mode: ${run.workspaceMode || "draft"}`,
       run.worktreePath ? `Managed worktree: ${run.worktreePath}` : "",
       `Files sampled:\n${files.slice(0, 140).join("\n")}`,
+      `Bounded source excerpts:\n${sourceExcerpts || "No readable source excerpts were selected."}`,
       `Git status:\n${gitStatus.stdout || gitStatus.stderr}`,
+      `Current change-set diff stat:\n${gitDiffStat.stdout || gitDiffStat.stderr || "No diff."}`,
+      `Current change-set diff (bounded):\n${gitDiff.stdout || gitDiff.stderr || "No diff."}`,
       `Cleanup policy: do not create scratch files in the project root; do not delete files automatically; propose cleanup in cleanup-report.md; keep run artifacts in app data.`
     ].filter(Boolean).join("\n\n");
 
+    let verificationEvidence = "";
+    if (current.steps.some((step) => step.id === "verification")) {
+      verificationEvidence = await executeVerificationChecks(current);
+      current = liveRuns.get(run.id) || current;
+    }
     const roleSteps = current.steps.filter((step) => step.agentRole);
     for (const step of roleSteps) {
       current = liveRuns.get(run.id);
@@ -3053,6 +4019,7 @@ async function runAgentPipeline(run) {
         "",
         `You are the ${step.name}.`,
         step.instruction,
+        verificationEvidence ? `Deterministic verification evidence:\n${verificationEvidence}` : "",
         "",
         "Return practical output. Include files you would touch, risks, tests, and cleanup/technical-debt notes. Do not invent completed edits."
       ].join("\n");
@@ -3113,6 +4080,8 @@ export async function startAgentRun(input) {
 
   const selectedRoleIds = Array.isArray(input.roles) && input.roles.length ? input.roles : ["planner", "implementer", "reviewer", "tester"];
   const selectedRoles = config.roles.filter((role) => selectedRoleIds.includes(role.id));
+  const roleRoutes = input.roleRoutes && typeof input.roleRoutes === "object" ? input.roleRoutes : {};
+  const primaryRoute = roleRoutes[selectedRoles[0]?.id] || {};
   const prompt = String(input?.prompt ?? "").trim() || "Inspect this project and recommend the next implementation step.";
   const workspaceMode = input?.workspaceMode || "draft";
   let executionPath = sourceProjectPath;
@@ -3128,9 +4097,11 @@ export async function startAgentRun(input) {
     workspaceMode,
     objectiveId: input?.objectiveId || null,
     objectiveTaskId: input?.objectiveTaskId || null,
+    worktreeKey: input?.worktreeKey || input?.objectiveId || null,
     patchMode: input?.patchMode || "off",
-    providerId: config.activeProviderId,
-    model: config.activeModel,
+    providerId: primaryRoute.providerId || input.providerId || config.activeProviderId,
+    model: primaryRoute.model || input.model || config.activeModel,
+    routeLocked: primaryRoute.locked === true || input.routeLocked === true,
     status: "queued",
     createdAt: nowIso(),
     updatedAt: nowIso(),
@@ -3138,15 +4109,26 @@ export async function startAgentRun(input) {
     cleanupPolicy: "Run artifacts stay in app data. Deletions and broad cleanup require explicit approval.",
     steps: [
       { id: "preflight", name: "Preflight", status: "queued", instruction: "Inspect project state and capture a baseline." },
-      ...selectedRoles.map((role) => ({
-        id: role.id,
-        name: role.name,
+      ...(selectedRoleIds.includes("tester") ? [{
+        id: "verification",
+        name: "Deterministic verification",
         status: "queued",
-        agentRole: role.id,
-        tool: role.defaultTool,
-        model: role.model,
-        instruction: role.instruction
-      })),
+        instruction: "Run the project's declared test, lint, typecheck, and build commands with provider credentials removed."
+      }] : []),
+      ...selectedRoles.map((role) => {
+        const route = roleRoutes[role.id] || {};
+        return {
+          id: role.id,
+          name: role.name,
+          status: "queued",
+          agentRole: role.id,
+          tool: role.defaultTool,
+          providerId: route.providerId || input.providerId || config.activeProviderId,
+          model: route.model || input.model || config.activeModel,
+          routeLocked: route.locked === true || input.routeLocked === true,
+          instruction: role.instruction
+        };
+      }),
       { id: "cleanup", name: "Cleanup Steward", status: "queued", instruction: "Identify clutter, generated files, untracked files, and technical-debt risks." }
     ]
   };
@@ -3157,7 +4139,8 @@ export async function startAgentRun(input) {
       threadId: input.threadId,
       title: run.title,
       prompt,
-      runId: run.id
+      runId: run.id,
+      objectiveKey: run.worktreeKey
     });
     lease = result.lease;
     executionPath = lease.executionPath || lease.path;
@@ -3567,7 +4550,44 @@ function normalizeTestPrompt(value) {
   return prompt || "Reply in one sentence: Agent Command Center API wiring is working.";
 }
 
-export async function callAnthropic({ prompt, model, maxTokens = 180 }) {
+function actualCostFromUsage(usage) {
+  for (const value of [usage?.cost, usage?.total_cost, usage?.cost_usd]) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number >= 0) return number;
+  }
+  return null;
+}
+
+async function withSpendingGuard({ providerId, prompt, maxTokens }, operation) {
+  const config = await readConfig();
+  const reservation = await spendGuard.reserve({
+    providerId,
+    prompt,
+    maxOutputTokens: maxTokens,
+    policy: config.spendingSafety
+  });
+  try {
+    const result = await operation(reservation.maxOutputTokens);
+    const actualCostUsd = actualCostFromUsage(result?.usage);
+    const settled = await spendGuard.settle(reservation, {
+      actualCostUsd,
+      outcome: "completed",
+      usage: result?.usage
+    });
+    return {
+      ...result,
+      spending: reservation.paid ? {
+        chargedOrReservedUsd: settled.chargedUsd,
+        costSource: actualCostUsd == null ? "conservative-reservation" : "provider"
+      } : { local: true }
+    };
+  } catch (error) {
+    await spendGuard.settle(reservation, { outcome: "failed-or-unknown" }).catch(() => {});
+    throw error;
+  }
+}
+
+async function callAnthropic({ prompt, model, maxTokens = 180 }) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     throw new Error("ANTHROPIC_API_KEY is not configured.");
@@ -3601,7 +4621,7 @@ export async function callAnthropic({ prompt, model, maxTokens = 180 }) {
   };
 }
 
-export async function callNvidia({ prompt, model, maxTokens = 180 }) {
+async function callNvidia({ prompt, model, maxTokens = 180 }) {
   const apiKey = process.env.NVIDIA_API_KEY;
   if (!apiKey) {
     throw new Error("NVIDIA_API_KEY is not configured.");
@@ -3652,11 +4672,17 @@ async function resolveProvider(providerId) {
     throw new Error(`Unsupported provider '${providerId}'.`);
   }
 
+  // Known cloud providers are pinned to their official endpoint and key name.
+  // Otherwise a modified config could point "xai" at an attacker URL and ask
+  // providerHeaders() to attach any environment secret by name.
+  const lockedCloud = runtime && !["lite-gateway", "ollama", "lm-studio"].includes(runtime.id);
   return {
     id: providerId,
     name: configuredProvider?.name || runtime?.name || providerId,
-    baseUrl: trimBaseUrl(configuredProvider?.baseUrl || runtime?.baseUrl || runtime?.redactedBaseUrl),
-    env: configuredProvider?.apiKeyEnv || runtime?.env,
+    baseUrl: trimBaseUrl(lockedCloud
+      ? (runtime.baseUrl || runtime.redactedBaseUrl)
+      : (configuredProvider?.baseUrl || runtime?.baseUrl || runtime?.redactedBaseUrl)),
+    env: lockedCloud ? runtime.env : (configuredProvider?.apiKeyEnv || runtime?.env),
     defaultModel: configuredProvider?.models?.[0] || runtime?.defaultModel,
     staticModels: configuredProvider?.models || [],
     requiresKey: runtime?.requiresKey !== false,
@@ -3708,7 +4734,7 @@ function collectChatCompletionText(data) {
   return "";
 }
 
-export async function callOpenAICompatible({ providerId, prompt, model, maxTokens = 180 }) {
+async function callOpenAICompatible({ providerId, prompt, model, maxTokens = 180 }) {
   const provider = await resolveProvider(providerId);
   const selectedModel = model || provider.defaultModel;
   if (!selectedModel) {
@@ -3740,7 +4766,7 @@ export async function callOpenAICompatible({ providerId, prompt, model, maxToken
   };
 }
 
-export async function listOpenAICompatibleModels(providerId) {
+export async function listOpenAICompatibleModels(providerId, { allowFallback = true } = {}) {
   const provider = await resolveProvider(providerId);
   const allowMissingKey = provider.allowAnonymousModelList || !provider.requiresKey;
 
@@ -3768,7 +4794,7 @@ export async function listOpenAICompatibleModels(providerId) {
         }))
     };
   } catch (error) {
-    if (provider.staticModels.length) {
+    if (allowFallback && provider.staticModels.length) {
       return staticModelList(provider);
     }
     throw error;
@@ -3787,7 +4813,7 @@ function collectOpenAIText(data) {
     .join("\n");
 }
 
-export async function callOpenAI({ prompt, model, maxTokens = 180 }) {
+async function callOpenAI({ prompt, model, maxTokens = 180 }) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error("OPENAI_API_KEY is not configured.");
@@ -3912,7 +4938,9 @@ function pricePerMillion(value) {
 function scoutReason(model) {
   const id = model.id.toLowerCase();
   const name = String(model.name || "").toLowerCase();
+  if (id.includes("kimi-k3")) return "newest Kimi agent/coding family";
   if (id.includes("kimi-k2.7")) return "latest long-horizon coding";
+  if (id.includes("qwen3.8")) return "newest Qwen reasoning/coding family";
   if (id.includes("glm-5")) return "GLM agentic coding family";
   if (id.includes("free")) return "zero-token-cost route";
   if (id.includes("auto")) return "automatic model router";
@@ -3952,11 +4980,11 @@ export async function scoutModels() {
   };
 }
 
-export async function listProviderModels(providerId) {
+export async function listProviderModels(providerId, options = {}) {
   if (providerId === "anthropic") return listAnthropicModels();
   if (providerId === "openai") return listOpenAIModels();
   if (providerId === "nvidia-nim") return listNvidiaModels();
-  if (["openrouter", "xai", "kimi", "zai-glm", "ollama", "lm-studio", "lite-gateway"].includes(providerId)) return listOpenAICompatibleModels(providerId);
+  if (["openrouter", "xai", "kimi", "deepseek", "qwen", "zai-glm", "ollama", "lm-studio", "lite-gateway"].includes(providerId)) return listOpenAICompatibleModels(providerId, options);
   throw new Error(`Unsupported provider '${providerId}'.`);
 }
 
@@ -3965,11 +4993,66 @@ export async function testProvider(body) {
   const model = String(body?.model ?? "").trim();
   const prompt = normalizeTestPrompt(body?.prompt);
   const maxTokens = Number(body?.maxTokens || body?.max_tokens || 180);
-  if (providerId === "anthropic") return callAnthropic({ prompt, model, maxTokens });
-  if (providerId === "openai") return callOpenAI({ prompt, model, maxTokens });
-  if (providerId === "nvidia-nim") return callNvidia({ prompt, model, maxTokens });
-  if (["openrouter", "xai", "kimi", "zai-glm", "ollama", "lm-studio", "lite-gateway"].includes(providerId)) {
-    return callOpenAICompatible({ providerId, prompt, model, maxTokens });
+  return withSpendingGuard({ providerId, prompt, maxTokens }, async (boundedMaxTokens) => {
+    if (providerId === "anthropic") return callAnthropic({ prompt, model, maxTokens: boundedMaxTokens });
+    if (providerId === "openai") return callOpenAI({ prompt, model, maxTokens: boundedMaxTokens });
+    if (providerId === "nvidia-nim") return callNvidia({ prompt, model, maxTokens: boundedMaxTokens });
+    if (["openrouter", "xai", "kimi", "deepseek", "qwen", "zai-glm", "ollama", "lm-studio", "lite-gateway"].includes(providerId)) {
+      return callOpenAICompatible({ providerId, prompt, model, maxTokens: boundedMaxTokens });
+    }
+    throw new Error(`Unsupported provider '${providerId}'.`);
+  });
+}
+
+export async function getProviderBalance(providerId) {
+  if (!new Set(["kimi", "deepseek"]).has(providerId)) {
+    const error = new Error(`Balance reporting is not supported for '${providerId}'.`);
+    error.status = 400;
+    throw error;
   }
-  throw new Error(`Unsupported provider '${providerId}'.`);
+  const isKimi = providerId === "kimi";
+  const apiKey = isKimi
+    ? process.env.MOONSHOT_API_KEY || process.env.KIMI_API_KEY
+    : process.env.DEEPSEEK_API_KEY;
+  if (!apiKey) {
+    throw new Error(isKimi
+      ? "MOONSHOT_API_KEY or KIMI_API_KEY is not configured."
+      : "DEEPSEEK_API_KEY is not configured.");
+  }
+  const response = await fetch(isKimi
+    ? "https://api.moonshot.ai/v1/users/me/balance"
+    : "https://api.deepseek.com/user/balance", {
+    headers: { authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(20_000)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || (isKimi && data?.status === false)) {
+    const message = data?.error?.message || data?.message
+      || `${isKimi ? "Kimi" : "DeepSeek"} balance request failed with HTTP ${response.status}`;
+    throw new Error(message);
+  }
+  const amount = (value) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  };
+  if (isKimi) {
+    return {
+      provider: "kimi",
+      availableBalanceUsd: amount(data?.data?.available_balance),
+      cashBalanceUsd: amount(data?.data?.cash_balance),
+      voucherBalanceUsd: amount(data?.data?.voucher_balance),
+      checkedAt: new Date().toISOString()
+    };
+  }
+  const balances = Array.isArray(data?.balance_infos) ? data.balance_infos : [];
+  const usd = balances.find((entry) => String(entry?.currency).toUpperCase() === "USD") ?? balances[0] ?? {};
+  return {
+    provider: "deepseek",
+    available: data?.is_available === true,
+    currency: String(usd?.currency || "USD").toUpperCase(),
+    availableBalanceUsd: amount(usd?.total_balance),
+    cashBalanceUsd: amount(usd?.topped_up_balance),
+    grantedBalanceUsd: amount(usd?.granted_balance),
+    checkedAt: new Date().toISOString()
+  };
 }

@@ -56,6 +56,8 @@ function reduceUpdate(state, update) {
     case UPDATE.USER_MESSAGE: {
       const text = textOf(update);
       if (!text) return state;
+      const last = state.turns[state.turns.length - 1];
+      if (last?.role === "user" && last.text === text) return state;
       next.turns = [...state.turns, { role: "user", text }];
       return next;
     }
@@ -133,9 +135,6 @@ export function useAgentSession(threadId) {
   // automatically when the turn ends, and stay editable until then.
   const [queue, setQueue] = useState([]);
   // Slash commands the agent itself advertises, merged into the palette.
-  const [commands, setCommands] = useState([]);
-  // Context usage, so the window limit is visible before it is hit.
-  const [usage, setUsage] = useState(null);
   // Memories the agent pulled in via the MCP tool, so the user can see WHY it
   // answered the way it did rather than the recall being invisible.
   const [memoryHits, setMemoryHits] = useState([]);
@@ -195,6 +194,10 @@ export function useAgentSession(threadId) {
         setError({ message: info.message, quota: Boolean(info.quota) });
       };
       const onTurnComplete = () => setBusy(false);
+      const onMemoryRecall = (e) => {
+        const info = JSON.parse(e.data);
+        if (!info.threadId || info.threadId === threadRef.current) setMemoryHits(info.hits ?? []);
+      };
 
       source.addEventListener("update", onUpdate);
       source.addEventListener("permission", onPermission);
@@ -203,6 +206,7 @@ export function useAgentSession(threadId) {
       source.onopen = () => setTransportReady(true);
       source.addEventListener("turn-error", onTurnError);
       source.addEventListener("turn-complete", onTurnComplete);
+      source.addEventListener("memory-recall", onMemoryRecall);
       source.onerror = () => setConnection({ status: "disconnected", detail: null });
 
       return () => {
@@ -212,7 +216,7 @@ export function useAgentSession(threadId) {
       };
     }
 
-    const offUpdate = bridge.onUpdate((payload) => {
+    const offUpdate = bridge.onAgentUpdate((payload) => {
       // Ignore traffic for other threads sharing the daemon.
       if (payload?.threadId && payload.threadId !== threadRef.current) return;
 
@@ -255,6 +259,9 @@ export function useAgentSession(threadId) {
     });
     const offDaemonError = bridge.onDaemonError?.((info) =>
       setError({ message: info?.message ?? "Agent process error", quota: false }));
+    const offMemoryRecall = bridge.onMemoryRecall?.((info) => {
+      if (!info?.threadId || info.threadId === threadRef.current) setMemoryHits(info.hits ?? []);
+    });
 
     // A run outlives the window, so re-show anything raised while it was closed.
     bridge.pendingPermissions?.().then((list) => {
@@ -274,11 +281,37 @@ export function useAgentSession(threadId) {
       offTurnComplete?.();
       offTurnError?.();
       offDaemonError?.();
+      offMemoryRecall?.();
       offConnected?.();
       offDisconnected?.();
       if (replayTimer.current) clearTimeout(replayTimer.current);
     };
   }, [bridge, flushReplay, beginReplay]);
+
+  // Opening a chat actively reattaches its persisted ACP session so history is
+  // visible before the next message. The host resolves the project path from
+  // the thread binding; the renderer supplies only the thread id.
+  useEffect(() => {
+    if (!threadId) return;
+    let active = true;
+    fetch("/api/agent/attach", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ threadId })
+    }).then(async (response) => {
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data?.error || `${response.status}`);
+      if (!active) return;
+      const transcript = Array.isArray(data.transcript) ? data.transcript : [];
+      if (transcript.length && !replaying.current) {
+        setState((current) => current.turns.length ? current : { ...current, turns: transcript });
+      }
+      setConnection({ status: "connected", detail: data });
+    }).catch((attachError) => {
+      if (active) setConnection({ status: "disconnected", detail: { message: attachError.message } });
+    });
+    return () => { active = false; };
+  }, [threadId]);
 
   const answerPermissionById = useCallback(async (id, optionId) => {
     if (!id) return;
@@ -308,7 +341,10 @@ export function useAgentSession(threadId) {
     }).catch(() => {});
   }, [bridge, permission]);
 
-  const send = useCallback(async (text, { projectPath = null, threadId = null, attachments = [] } = {}) => {
+  const send = useCallback(async (text, {
+    projectPath = null, threadId = null, attachments = [],
+    harnessId = "grok-build-local", harnessConsent = false
+  } = {}) => {
     // An attachment alone is a legitimate message — "look at this" with a file
     // and no prose should send.
     if (!text?.trim() && !attachments.length) return;
@@ -331,7 +367,9 @@ export function useAgentSession(threadId) {
       const response = await fetch("/api/agent/prompt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ threadId: target, text, projectPath, attachments })
+        body: JSON.stringify({
+          threadId: target, text, projectPath, attachments, harnessId, harnessConsent
+        })
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data?.error || `${response.status}`);
@@ -347,9 +385,9 @@ export function useAgentSession(threadId) {
   }, []);
 
   /** Queue a message for when the current turn finishes. */
-  const enqueue = useCallback((text) => {
-    if (!text?.trim()) return;
-    setQueue((q) => [...q, { id: `q_${Date.now()}_${q.length}`, text }]);
+  const enqueue = useCallback((text, options = {}) => {
+    if (!text?.trim() && !(options.attachments?.length)) return;
+    setQueue((q) => [...q, { id: `q_${Date.now()}_${q.length}`, text, options }]);
   }, []);
 
   const dequeue = useCallback((id) => {
@@ -374,7 +412,7 @@ export function useAgentSession(threadId) {
     if (busy || !queue.length) return;
     const [next, ...rest] = queue;
     setQueue(rest);
-    send(next.text).catch(() => {});
+    send(next.text, next.options).catch(() => {});
   }, [busy, queue, send]);
 
   // Reset when the user switches threads.
@@ -424,13 +462,13 @@ export function useAgentSession(threadId) {
     cancel,
     queue,
     memoryHits,
-    usage,
-    commands,
+    usage: state.usage ?? null,
+    commands: state.commands ?? [],
     enqueue,
     dequeue,
     editQueued,
     // Usable in the desktop app via IPC, and in the dev browser via SSE.
     available: transportReady
   }), [state, permission, answerPermission, connection, busy, error, send, cancel,
-       transportReady, queue, enqueue, dequeue, editQueued, memoryHits, usage, commands]);
+       transportReady, queue, enqueue, dequeue, editQueued, memoryHits]);
 }

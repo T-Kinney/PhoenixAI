@@ -8,6 +8,7 @@
 node_modules/
 dist/
 release/
+.build-cache/
 *.tsbuildinfo
 
 # Local app state: threads, messages, session bindings, the memory database,

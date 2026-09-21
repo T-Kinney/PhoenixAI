@@ -19,6 +19,7 @@ import * as api from "./api.js";
 import { HarnessRegistry } from "./acp/harnesses.js";
 import { workflowCommand } from "./acp/workflows.js";
 import { checkGrokVersion } from "./acp/daemon.js";
+import { projectPathForThread } from "./security.js";
 
 // One shared registry: the catalogue is identical for every caller and the
 // fetch is cached with an offline fallback.
@@ -45,13 +46,19 @@ function compile(path) {
  * between Electron and the dev server (native dialogs, the ACP session manager).
  */
 export function buildRoutes(deps = {}) {
-  const { selectFolder = null, sessions = null } = deps;
+  const { selectFolder = null, sessions = null, credentials = null } = deps;
 
   const routes = [
     // --- workspace -------------------------------------------------------
     ["GET",  "/api/health",    async () => ({ ok: true, ts: new Date().toISOString() })],
     ["GET",  "/api/tools",     async () => api.getToolsStatus()],
-    ["GET",  "/api/workspace", async () => api.getWorkspaceState()],
+    ["GET",  "/api/workspace", async () => {
+      const cleanup = await api.cleanupWorkspaceState({
+        hasTranscript: (threadId) => sessions?.transcriptFor?.(threadId) ?? []
+      });
+      for (const threadId of cleanup.removedThreadIds) await sessions?.unbind?.(threadId);
+      return api.getWorkspaceState();
+    }],
     ["POST", "/api/projects",  async ({ body }) => api.addProject(body)],
     ["POST", "/api/projects/select-folder", async () => {
       if (!selectFolder) {
@@ -63,8 +70,32 @@ export function buildRoutes(deps = {}) {
     }],
 
     // --- threads ---------------------------------------------------------
-    ["POST", "/api/threads", async ({ body }) => api.createThread(body)],
+    ["POST", "/api/threads", async ({ body }) => api.createThread(body, {
+      hasTranscript: (threadId) => sessions?.transcriptFor?.(threadId) ?? []
+    })],
     ["GET",  "/api/threads/:threadId", async ({ params }) => api.getThreadBundle(params.threadId)],
+    ["POST", "/api/threads/:threadId/rename", async ({ params, body }) =>
+      api.renameThread(params.threadId, body.title)],
+    ["POST", "/api/threads/:threadId/delete", async ({ params }) => {
+      await sessions?.unbind(params.threadId);
+      return api.deleteThread(params.threadId);
+    }],
+    ["GET", "/api/threads/:threadId/file", async ({ params, query }) =>
+      api.readThreadProjectFile(params.threadId, query.path)],
+    ["GET", "/api/threads/:threadId/diff", async ({ params }) =>
+      api.getThreadProjectDiff(params.threadId)],
+    ["POST", "/api/threads/:threadId/search", async ({ params, body }) =>
+      api.searchThreadProject(params.threadId, body)],
+    ["POST", "/api/threads/:threadId/terminal", async ({ params, body }) =>
+      api.runThreadProjectCommand(params.threadId, body)],
+    ["GET", "/api/threads/:threadId/skills", async ({ params }) =>
+      api.listThreadProjectSkills(params.threadId)],
+    ["GET", "/api/threads/:threadId/checkpoints", async ({ params }) =>
+      api.listThreadCheckpoints(params.threadId)],
+    ["POST", "/api/threads/:threadId/checkpoints", async ({ params, body }) =>
+      api.createThreadCheckpoint(params.threadId, body)],
+    ["POST", "/api/threads/:threadId/checkpoints/:checkpointId/restore", async ({ params }) =>
+      api.restoreThreadCheckpoint(params.threadId, params.checkpointId)],
     // NOTE: positional (threadId, input) — passing a single merged object made
     // every message 502 and took all slash commands with it.
     ["POST", "/api/threads/:threadId/messages",
@@ -72,13 +103,51 @@ export function buildRoutes(deps = {}) {
 
     // --- config / providers ----------------------------------------------
     ["GET",  "/api/config", async () => api.readConfig()],
-    ["POST", "/api/config", async ({ body }) => api.writeConfig(body)],
+    ["GET",  "/api/diagnostics", async () => api.getDiagnostics()],
+    ["POST", "/api/config", async ({ body }) => {
+      const config = await api.writeConfig(body);
+      await sessions?.setSpendingSafety?.(config.spendingSafety, api.spendLedgerPath);
+      return config;
+    }],
+    ["GET", "/api/spending-safety", async () => api.getSpendingSafety()],
+    ["POST", "/api/spending-safety", async ({ body }) => {
+      const status = await api.updateSpendingSafety(body);
+      await sessions?.setSpendingSafety?.(status.policy, api.spendLedgerPath);
+      return status;
+    }],
     ["GET",  "/api/providers/status", async () => api.getProviderStatus()],
+    ["GET", "/api/providers/:providerId/balance", async ({ params }) => api.getProviderBalance(params.providerId)],
     ["GET",  "/api/stripe/status",    async () => api.getStripeStatus()],
     ["GET",  "/api/models/scout",     async () => api.scoutModels()],
     ["GET",  "/api/providers/:providerId/models",
-      async ({ params }) => api.listProviderModels(params.providerId)],
+      async ({ params, query }) => api.listProviderModels(params.providerId, { allowFallback: query.strict !== "1" })],
     ["POST", "/api/providers/test", async ({ body }) => api.testProvider(body)],
+    ["GET", "/api/credentials", async () => credentials?.status() ?? ({
+      available: false,
+      encryption: "desktop-only",
+      errors: [],
+      providers: []
+    })],
+    ["POST", "/api/credentials/:providerId", async ({ params, body }) => {
+      if (!credentials) {
+        const error = new Error("Encrypted credential storage is available only in the desktop app.");
+        error.status = 501;
+        throw error;
+      }
+      const status = await credentials.set(params.providerId, body.value);
+      const agentReload = await sessions?.refreshEnvironment?.();
+      return { ...status, agentReload: agentReload ?? null };
+    }],
+    ["POST", "/api/credentials/:providerId/clear", async ({ params }) => {
+      if (!credentials) {
+        const error = new Error("Encrypted credential storage is available only in the desktop app.");
+        error.status = 501;
+        throw error;
+      }
+      const status = await credentials.clear(params.providerId);
+      const agentReload = await sessions?.refreshEnvironment?.();
+      return { ...status, agentReload: agentReload ?? null };
+    }],
 
     // --- runs -------------------------------------------------------------
     ["POST", "/api/runs/plan",  async ({ body }) => api.planRun(body)],
@@ -94,6 +163,30 @@ export function buildRoutes(deps = {}) {
     ["POST", "/api/worktrees/ensure", async ({ body }) => api.ensureWorktreeLease(body)],
     ["POST", "/api/worktrees/:leaseId/archive",
       async ({ params }) => api.archiveWorktreeLease(params.leaseId)],
+
+    // --- strategy lab (offline research only) -----------------------------
+    ["GET",  "/api/strategy-lab", async ({ query }) => api.getStrategyLabState(query)],
+    ["POST", "/api/strategy-lab/specs", async ({ body }) => api.createStrategySpec(body)],
+    ["POST", "/api/strategy-lab/specs/:specId/versions",
+      async ({ params, body }) => api.createStrategySpecVersion({ ...body, specId: params.specId })],
+    ["POST", "/api/strategy-lab/datasets/inspect", async ({ body }) => api.inspectStrategyDataset(body)],
+    ["POST", "/api/strategy-lab/experiments", async ({ body }) => api.recordStrategyExperiment(body)],
+    ["GET",  "/api/strategy-lab/experiments/compare", async ({ query }) => api.compareStrategyExperiments(query)],
+
+    // --- allowlisted read-only market data; no account/order routes -------
+    ["GET",  "/api/market-data/status", async () => api.getMarketDataStatus()],
+    ["POST", "/api/market-data/quotes", async ({ body }) => api.getMarketQuotes(body)],
+    ["POST", "/api/market-data/options/expirations", async ({ body }) => api.getOptionExpirations(body)],
+    ["POST", "/api/market-data/options/chain", async ({ body }) => api.getOptionChain(body)],
+    ["POST", "/api/market-data/options/greeks", async ({ body }) => api.getOptionGreeks(body)],
+    ["POST", "/api/market-data/bars", async ({ body }) => api.getMarketBars(body)],
+
+    // --- project-scoped signals and paper-only execution ------------------
+    ["GET",  "/api/research-operations", async ({ query }) => api.getResearchOperationsState(query)],
+    ["POST", "/api/research-operations/alerts", async ({ body }) => api.createResearchAlert(body)],
+    ["POST", "/api/research-operations/alerts/scan", async ({ body }) => api.scanResearchAlerts(body)],
+    ["POST", "/api/research-operations/paper-account", async ({ body }) => api.createPaperAccount(body)],
+    ["POST", "/api/research-operations/paper-fills/simulate", async ({ body }) => api.simulatePaperFill(body)],
 
     // --- objectives / goals / loops ---------------------------------------
     ["GET",  "/api/objectives", async ({ query }) => api.listObjectives(query)],
@@ -115,6 +208,8 @@ export function buildRoutes(deps = {}) {
     ["POST", "/api/objectives/:objectiveId/tasks/:taskId/merge",
       async ({ params, body }) =>
         api.mergeObjectiveTaskToSource({ ...body, objectiveId: params.objectiveId, taskId: params.taskId })],
+    ["GET",  "/api/objectives/:objectiveId/events",
+      async ({ params, query }) => api.listObjectiveEvents(params.objectiveId, query)],
     ["GET",  "/api/objectives/:objectiveId", async ({ params }) => api.getObjective(params.objectiveId)],
 
     ["GET",  "/api/goals", async ({ query }) => api.listGoals(query)],
@@ -139,18 +234,64 @@ export function buildRoutes(deps = {}) {
 
     routes.push(
       ["GET",  "/api/agent/status", async () => sessions.status],
+      ["GET",  "/api/agent/binding/:threadId", async ({ params }) => ({
+        binding: sessions.bindingFor(params.threadId)
+      })],
+      ["GET", "/api/agent/capabilities/:threadId", async ({ params }) => ({
+        capabilities: sessions.capabilitiesFor(
+          await projectPathForThread(params.threadId, api.getThreadBundle)
+        )
+      })],
       ["POST", "/api/agent/connect", async () => sessions.connect()],
+      ["POST", "/api/agent/attach", async ({ body }) => {
+        const threadId = requireThreadId(body.threadId);
+        const projectPath = await projectPathForThread(threadId, api.getThreadBundle);
+        return sessions.attachThread(threadId, projectPath);
+      }],
 
       // Returns as soon as the turn is ACCEPTED. Holding the request open for
       // the whole run made this unusable from a browser — a turn can take
       // minutes. Completion arrives on the event stream.
-      ["POST", "/api/agent/prompt", async ({ body }) =>
-        sessions.startPrompt(requireThreadId(body.threadId), String(body.text ?? ""), {
-          projectPath: body.projectPath,
+      ["POST", "/api/agent/prompt", async ({ body }) => {
+        const threadId = requireThreadId(body.threadId);
+        const projectPath = await projectPathForThread(threadId, api.getThreadBundle, body.projectPath);
+        await api.noteThreadPrompt(threadId, String(body.text ?? ""));
+        const harnessId = String(body.harnessId || "grok-build-local");
+        let launch = null;
+        if (harnessId !== "grok-build-local") {
+          if (body.harnessConsent !== true) {
+            const error = new Error("Explicit consent is required before a registry agent can be downloaded and run.");
+            error.status = 403;
+            throw error;
+          }
+          await harnessRegistry.load();
+          launch = harnessRegistry.resolveLaunch(harnessId);
+          if (!launch || launch.kind !== "npx") {
+            const error = new Error(`Harness '${harnessId}' is not runnable on this machine.`);
+            error.status = 400;
+            throw error;
+          }
+          // Credential forwarding is explicit and harness-scoped. Generic
+          // children otherwise receive the scrubbed runtime environment.
+          const name = `${harnessId} ${launch.name ?? ""}`.toLowerCase();
+          const names = name.includes("qwen")
+            ? ["DASHSCOPE_API_KEY", "BAILIAN_CODING_PLAN_API_KEY"]
+            : name.includes("kimi")
+              ? ["MOONSHOT_API_KEY", "KIMI_API_KEY"]
+              : name.includes("deepseek") ? ["DEEPSEEK_API_KEY"] : [];
+          launch.env = Object.fromEntries(names
+            .filter((key) => process.env[key])
+            .map((key) => [key, process.env[key]]));
+        }
+        return sessions.startPrompt(threadId, String(body.text ?? ""), {
+          projectPath,
+          harnessId,
+          launch,
           // [{name, data}] with data base64. Converted to ACP content blocks
           // against the live agent's declared capabilities.
           attachments: Array.isArray(body.attachments) ? body.attachments : []
-        })],
+        });
+      }],
 
       // Approval posture. Persisted in config so it survives a restart, and
       // applied to the live manager immediately rather than only on next launch.
@@ -161,6 +302,20 @@ export function buildRoutes(deps = {}) {
         const config = await api.readConfig();
         await api.writeConfig({ ...config, approvalMode: mode });
         return { mode };
+      }],
+      ["GET", "/api/agent/reasoning", async () => ({ effort: sessions.reasoningEffort ?? null })],
+      ["POST", "/api/agent/reasoning", async ({ body }) => {
+        const allowed = new Set([null, "low", "medium", "high", "xhigh"]);
+        const effort = body?.effort ? String(body.effort) : null;
+        if (!allowed.has(effort)) {
+          const error = new Error("Unsupported reasoning effort.");
+          error.status = 400;
+          throw error;
+        }
+        sessions.reasoningEffort = effort;
+        const config = await api.readConfig();
+        await api.writeConfig({ ...config, reasoningEffort: effort });
+        return { effort, appliesTo: "new-sessions" };
       }],
 
       ["POST", "/api/agent/cancel",
@@ -184,6 +339,7 @@ export function buildRoutes(deps = {}) {
         async ({ body }) => sessions.submitAuthCode(body.code)],
       ["POST", "/api/agent/auth/cancel", async () => sessions.cancelLogin()],
       ["POST", "/api/agent/auth/logout", async () => sessions.logout()],
+      ["GET",  "/api/agent/billing", async () => sessions.billingStatus({ force: true, connect: false })],
 
       // --- agent version ---
       // Surfaced rather than auto-applied: swapping the agent binary mid-session
