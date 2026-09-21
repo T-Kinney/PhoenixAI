@@ -134,8 +134,10 @@ export class GrokDaemon extends EventEmitter {
     cwd = process.cwd(),
     env = {},
     extraArgs = [],
-    // Default on: this client is built for subscription/trial auth, and an
-    // unfunded API key otherwise surfaces as an opaque permission-denied.
+    model = null,
+    // When true, the child is forced onto SuperGrok session auth. When an
+    // XAI_API_KEY is present the host passes forceSessionAuth: false so Grok
+    // 4.7 bills api.x.ai instead of the subscription pool.
     forceSessionAuth = true
   } = {}) {
     super();
@@ -143,6 +145,7 @@ export class GrokDaemon extends EventEmitter {
     this.cwd = cwd;
     this.env = env;
     this.extraArgs = extraArgs;
+    this.model = model;
     this.forceSessionAuth = forceSessionAuth;
   }
 
@@ -161,7 +164,9 @@ export class GrokDaemon extends EventEmitter {
       host: HOST,
       port: this.#port,
       pid: this.#proc?.pid ?? null,
-      cwd: this.cwd
+      cwd: this.cwd,
+      model: this.model,
+      authMode: this.forceSessionAuth ? "subscription" : "api-key"
     };
   }
 
@@ -216,12 +221,12 @@ export class GrokDaemon extends EventEmitter {
       stdio: ["ignore", "pipe", "pipe"],
       env: (() => {
         const merged = safeChildEnv(this.env);
-        // Force subscription/session auth. Scrubbing key env vars does NOT
-        // achieve this: cached_token already outranks the api key for billing,
-        // and the agent re-populates XAI_API_KEY on itself from ~/.grok/auth.json
-        // during initialize. The supported lever is the admin kill switch, which
-        // stops the api-key method being advertised at all.
+        // Session auth hits the SuperGrok CLI proxy. API-key auth hits
+        // api.x.ai. The kill switch is only used when no XAI_API_KEY was
+        // injected — otherwise Grok 4.7 would ignore the key and keep using
+        // the cached grok.com token.
         if (this.forceSessionAuth) merged.GROK_DISABLE_API_KEY_AUTH = "1";
+        else delete merged.GROK_DISABLE_API_KEY_AUTH;
         merged.GROK_AGENT_SECRET = this.#secret;
         return merged;
       })()

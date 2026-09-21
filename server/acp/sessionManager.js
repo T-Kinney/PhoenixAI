@@ -22,6 +22,7 @@ import { WorkflowTracker, isWorkflowUpdate, workflowsFromCommands } from "./work
 import { buildPromptBlocks } from "./attachments.js";
 import { MemoryStore } from "../memory/store.js";
 import { buildRecoveryEnvelope, parseRecoveryEnvelope, visibleRecoveryUpdate } from "./continuity.js";
+import { grokDaemonLaunchOptions, resolveGrokModel, resolveXaiApiKey } from "../grokConfig.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // A spawned child process cannot read from inside app.asar, so in a packaged
@@ -163,7 +164,8 @@ export class SessionManager extends EventEmitter {
     spendLedgerPath = null,
     // Extra MCP servers, same shape as the ACP `mcpServers` entries.
     extraMcpServers = [],
-    grokClient = null
+    grokClient = null,
+    grokModel = null
   } = {}) {
     super();
     this.statePath = statePath;
@@ -181,6 +183,7 @@ export class SessionManager extends EventEmitter {
     this.spendLedgerPath = spendLedgerPath;
     this.extraMcpServers = extraMcpServers;
     this.grokClient = grokClient;
+    this.grokModel = grokModel || resolveGrokModel();
     if (memoryDbPath) {
       try { this.#memoryStore = new MemoryStore(memoryDbPath).open(); }
       catch (error) { this.lastMemoryError = error; }
@@ -301,6 +304,7 @@ export class SessionManager extends EventEmitter {
     this.#clients.clear();
     await Promise.all(clients.map((item) => item.stop().catch(() => {})));
     await this.#daemon?.stop().catch(() => {});
+    this.#daemon = null;
     this.emit("released", { reason: "idle" });
     return { released: true };
   }
@@ -331,7 +335,8 @@ export class SessionManager extends EventEmitter {
       startupHints: {
         // A GUI has no TTY; saying so stops the agent waiting on terminal-only
         // affordances.
-        nonInteractive: true
+        nonInteractive: true,
+        model: this.grokModel
       }
     };
     if (this.reasoningEffort) meta.reasoningEffort = this.reasoningEffort;
@@ -340,6 +345,7 @@ export class SessionManager extends EventEmitter {
 
   /** Auth plane in use, so the UI can state it rather than leave it inferred. */
   get authMode() {
+    if (resolveXaiApiKey()) return "api-key";
     const ids = (this.#client?.authMethods ?? []).map((m) => m.id);
     if (ids.includes("cached_token")) return "subscription";
     return ids[0] ?? "unknown";
@@ -354,6 +360,8 @@ export class SessionManager extends EventEmitter {
         ...[...this.#clients.entries()].filter(([, client]) => client.running).map(([id]) => id)
       ],
       authMode: this.authMode,
+      model: this.grokModel,
+      usingApiKey: Boolean(resolveXaiApiKey()),
       threads: [...this.#bindings.keys()],
       pendingPermissions: [...this.#permissions.keys()],
       workflows: this.#workflows.active().length,
@@ -406,7 +414,12 @@ export class SessionManager extends EventEmitter {
       return this.status;
     }
     if (!this.#daemon) {
-      this.#daemon = new GrokDaemon({ cwd: this.defaultCwd });
+      const launch = grokDaemonLaunchOptions({
+        cwd: this.defaultCwd,
+        model: this.grokModel,
+        effort: this.reasoningEffort || "high"
+      });
+      this.#daemon = new GrokDaemon(launch);
       this.#daemon.on("stderr", (text) => this.emit("daemon-output", text));
       this.#daemon.on("exit", (info) => this.emit("daemon-exit", info));
       this.#daemon.on("error", (e) => this.emit("daemon-error", e));
@@ -677,20 +690,27 @@ export class SessionManager extends EventEmitter {
     await this.connect();
     try {
       const info = await this.#client.authInfo();
+      const usingApiKey = Boolean(resolveXaiApiKey());
       return {
-        authenticated: Boolean(info?.methodId),
-        methodId: info?.methodId ?? null,
+        authenticated: usingApiKey || Boolean(info?.methodId),
+        methodId: info?.methodId ?? (usingApiKey ? "api_key" : null),
         email: info?.email ?? null,
         teamName: info?.teamName ?? null,
         dataRetentionOptOut: Boolean(info?.codingDataRetentionOptOut),
         authMode: this.authMode,
+        model: this.grokModel,
+        usingApiKey,
         availableMethods: this.#client.authMethods
       };
     } catch (error) {
+      const usingApiKey = Boolean(resolveXaiApiKey());
       return {
-        authenticated: false,
-        error: error.message,
+        authenticated: usingApiKey,
+        methodId: usingApiKey ? "api_key" : null,
+        error: usingApiKey ? undefined : error.message,
         authMode: this.authMode,
+        model: this.grokModel,
+        usingApiKey,
         availableMethods: this.#client?.authMethods ?? []
       };
     }

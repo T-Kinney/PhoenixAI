@@ -59,9 +59,11 @@ by running traffic.
   way back.
 - **Session auth and API-key auth hit different backends.** A cached session
   token routes to `cli-chat-proxy.grok.com` (subscription pool); an API key routes
-  to `api.x.ai` (per-token billing). `GROK_DISABLE_API_KEY_AUTH=1` forces the
-  former — scrubbing env vars does not, because the agent re-populates
-  `XAI_API_KEY` on itself during `initialize`.
+  to `api.x.ai` (per-token billing, Grok 4.7). PhoenixAI injects `XAI_API_KEY`
+  into the agent child and omits `GROK_DISABLE_API_KEY_AUTH` whenever a key is
+  configured. The kill switch is only set when no key is present, so a signed-in
+  SuperGrok install still works without an API key. Launch args include
+  `--model grok-4.7` and `--effort high`.
 - **`grok agent serve` survives client disconnects.** Verified: a turn severed
   mid-flight completed server-side and the result was correct on reconnect.
 - **WebSocket auth** accepts `Authorization: Bearer <secret>` or `?server-key=`

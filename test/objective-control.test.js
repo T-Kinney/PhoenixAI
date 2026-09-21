@@ -29,6 +29,8 @@ test("objectives assign the requested model lanes and record safe control bounda
   });
 
   assert.equal(objective.control.commander.id, "grok-build-local");
+  assert.equal(objective.control.commander.model, "grok-4.7");
+  assert.equal(objective.control.commander.execution, "api-key");
   assert.equal(objective.control.operatingMode, "research");
   assert.equal(objective.control.execution.liveTrading, "disabled");
   assert.equal(objective.control.execution.orderPlacement, "disabled");

@@ -10,6 +10,7 @@ import { DEFAULT_SPENDING_SAFETY, SpendGuard, sanitizeSpendingSafety } from "./s
 import { StrategyLab } from "./strategyLab.js";
 import { PublicMarketData } from "./publicMarketData.js";
 import { ResearchOperations } from "./researchOperations.js";
+import { DEFAULT_GROK_MODEL, XAI_API_BASE_URL, XAI_STATIC_MODELS, resolveGrokModel, resolveXaiApiKey } from "./grokConfig.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const rootDir = path.resolve(__dirname, "..");
@@ -37,6 +38,9 @@ if (!process.env.MOONSHOT_API_KEY && process.env.KIMI_API_KEY) {
 }
 if (!process.env.PUBLIC_COM_SECRET && process.env.PUBLIC_API_SECRET_KEY) {
   process.env.PUBLIC_COM_SECRET = process.env.PUBLIC_API_SECRET_KEY;
+}
+if (!process.env.XAI_API_KEY && process.env.GROK_API_KEY) {
+  process.env.XAI_API_KEY = process.env.GROK_API_KEY;
 }
 if (!process.env.PUBLIC_COM_ACCOUNT_ID && process.env.PUBLIC_DEFAULT_ACCOUNT_ID) {
   process.env.PUBLIC_COM_ACCOUNT_ID = process.env.PUBLIC_DEFAULT_ACCOUNT_ID;
@@ -162,17 +166,9 @@ export const defaultConfig = {
       id: "xai",
       name: "xAI Grok API",
       kind: "openai-compatible",
-      baseUrl: "https://api.x.ai/v1",
+      baseUrl: XAI_API_BASE_URL,
       apiKeyEnv: "XAI_API_KEY",
-      models: [
-        "grok-4.6",
-        "grok-code-fast",
-        "grok-4-1-fast-reasoning",
-        "grok-4-1-fast-non-reasoning",
-        "grok-4",
-        "grok-4-fast-reasoning",
-        "grok-4-fast-non-reasoning"
-      ]
+      models: [...XAI_STATIC_MODELS]
     },
     {
       id: "zai-glm",
@@ -350,9 +346,9 @@ const providerRuntime = {
     id: "xai",
     name: "xAI Grok API",
     env: "XAI_API_KEY",
-    defaultModel: "grok-4.6",
-    redactedBaseUrl: "https://api.x.ai/v1",
-    baseUrl: "https://api.x.ai/v1"
+    defaultModel: DEFAULT_GROK_MODEL,
+    redactedBaseUrl: XAI_API_BASE_URL,
+    baseUrl: XAI_API_BASE_URL
   },
   openai: {
     id: "openai",
@@ -2192,7 +2188,7 @@ function buildClarifyingQuestions(idea, flags) {
 }
 
 function buildAgentPlan(config, flags) {
-  const frontier = pickRoute(config, ["xai", "qwen", "kimi", "nvidia-nim", "ollama", "lite-gateway", "zai-glm", "anthropic", "openai"], ["grok-4.6", "grok-4", "qwen3.8-max", "kimi-k3", "nemotron", "gemma4"]);
+  const frontier = pickRoute(config, ["xai", "qwen", "kimi", "nvidia-nim", "ollama", "lite-gateway", "zai-glm", "anthropic", "openai"], [DEFAULT_GROK_MODEL, "grok-4.6", "grok-4", "qwen3.8-max", "kimi-k3", "nemotron", "gemma4"]);
   const cheapCoder = pickRoute(config, ["kimi", "qwen", "nvidia-nim", "ollama", "lite-gateway", "lm-studio"], ["kimi-k2.7-code", "qwen3-coder", "coder", "gemma4", "nemotron"]);
   const reviewer = pickRoute(config, ["deepseek", "qwen", "nvidia-nim", "ollama", "xai"], ["deepseek-v4-pro", "deepseek-v4", "deepseek", "qwen3.8-max", "nemotron"]);
   const cheapGeneral = pickRoute(config, ["qwen", "nvidia-nim", "ollama", "lite-gateway", "lm-studio", "kimi"], ["qwen3.8-max", "qwen3", "qwen", "gemma4", "free", "gpt-oss", "nemotron"]);
@@ -2270,7 +2266,8 @@ function buildObjectiveControl(config, flags) {
     commander: {
       id: "grok-build-local",
       name: "Grok Build",
-      execution: "subscription-session",
+      model: resolveGrokModel(),
+      execution: resolveXaiApiKey() ? "api-key" : "subscription-session",
       responsibility: "Own scope, decisions, delegation, arbitration, and final delivery."
     },
     routeEnforcement: "locked-per-agent",
@@ -3822,8 +3819,8 @@ function chatRoutes(config) {
   if (hasEnv("XAI_API_KEY") && !routes.some((route) => route.providerId === "xai")) {
     routes.push({
       providerId: "xai",
-      model: "grok-4.3",
-      reason: "xAI Grok fallback"
+      model: resolveGrokModel(),
+      reason: "xAI Grok 4.7 API"
     });
   }
   return routes;
@@ -4741,15 +4738,22 @@ async function callOpenAICompatible({ providerId, prompt, model, maxTokens = 180
     throw new Error(`No model selected for ${provider.name}.`);
   }
 
+  const headers = providerHeaders(provider, { json: true });
+  const body = {
+    model: selectedModel,
+    max_tokens: maxTokens,
+    temperature: 0.2,
+    messages: [{ role: "user", content: normalizeTestPrompt(prompt) }]
+  };
+  if (provider.id === "xai") {
+    headers["x-grok-conv-id"] = "phoenixai-desktop";
+    if (!model) body.model = resolveGrokModel();
+  }
+
   const response = await fetch(`${provider.baseUrl}/chat/completions`, {
     method: "POST",
-    headers: providerHeaders(provider, { json: true }),
-    body: JSON.stringify({
-      model: selectedModel,
-      max_tokens: maxTokens,
-      temperature: 0.2,
-      messages: [{ role: "user", content: normalizeTestPrompt(prompt) }]
-    })
+    headers,
+    body: JSON.stringify(body)
   });
 
   const data = await response.json().catch(() => ({}));

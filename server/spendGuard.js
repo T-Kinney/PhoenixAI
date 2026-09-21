@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { resolveXaiApiKey } from "./grokConfig.js";
 
 export const LOCAL_PROVIDER_IDS = new Set(["ollama", "lm-studio", "lite-gateway"]);
 
@@ -125,10 +126,11 @@ export class SpendGuard {
     if (providerId === "openrouter") {
       return this.#blocked(providerId, "OpenRouter inference is hard-blocked in this release.", "OPENROUTER_BLOCKED");
     }
-    if (!policy.paidCloudCallsEnabled) {
+    const xaiHome = providerId === "xai" && Boolean(resolveXaiApiKey());
+    if (!xaiHome && !policy.paidCloudCallsEnabled) {
       return this.#blocked(providerId, "Paid cloud calls are locked. Enable them explicitly in Spending safety.", "PAID_CALLS_LOCKED");
     }
-    if (policy.dailyBudgetUsd <= 0 || policy.perRequestBudgetUsd <= 0) {
+    if (!xaiHome && (policy.dailyBudgetUsd <= 0 || policy.perRequestBudgetUsd <= 0)) {
       return this.#blocked(providerId, "Paid calls require non-zero daily and per-request budgets.", "NO_BUDGET");
     }
 
@@ -142,7 +144,7 @@ export class SpendGuard {
     }
 
     const estimatedUsd = this.estimate({ prompt, maxOutputTokens: boundedOutputTokens, policy });
-    if (estimatedUsd > policy.perRequestBudgetUsd) {
+    if (!xaiHome && estimatedUsd > policy.perRequestBudgetUsd) {
       return this.#blocked(
         providerId,
         `Conservative request reservation $${estimatedUsd.toFixed(4)} exceeds the $${policy.perRequestBudgetUsd.toFixed(2)} per-request limit.`,
@@ -159,7 +161,7 @@ export class SpendGuard {
       if (summary.requestsLastHour >= policy.maxRequestsPerHour) {
         return { blocked: `Paid request limit of ${policy.maxRequestsPerHour} per hour reached.`, code: "PAID_RATE_LIMIT" };
       }
-      if (money(summary.chargedUsd + estimatedUsd) > policy.dailyBudgetUsd) {
+      if (!xaiHome && money(summary.chargedUsd + estimatedUsd) > policy.dailyBudgetUsd) {
         return {
           blocked: `Daily local budget would be exceeded ($${summary.chargedUsd.toFixed(4)} used/reserved of $${policy.dailyBudgetUsd.toFixed(2)}).`,
           code: "DAILY_BUDGET"

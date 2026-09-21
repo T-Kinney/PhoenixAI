@@ -517,7 +517,7 @@ function ControlRoom({ threadId, project, spending, onOpenChat, onError }) {
           <div className="controlGrid">
             <section className="controlCard controlAgents">
               <div className="controlCardHead"><ShieldCheck size={14} /><span>Command and agent lanes</span></div>
-              <div className="commanderRow"><span className="agentGlyph">G</span><div><strong>{selected.control?.commander?.name || "Grok Build"}</strong><small>Commander · scope, delegate, arbitrate, deliver</small></div><b>subscription session</b></div>
+              <div className="commanderRow"><span className="agentGlyph">G</span><div><strong>{selected.control?.commander?.name || "Grok Build"}</strong><small>Commander · {selected.control?.commander?.model || "grok-4.7"} · scope, delegate, arbitrate, deliver</small></div><b>{selected.control?.commander?.execution === "api-key" ? "xAI API · grok-4.7" : selected.control?.commander?.execution === "subscription-session" ? "subscription session" : (selected.control?.commander?.execution || "Grok")}</b></div>
               {(selected.agents || []).map((agent) => <div className="agentLane" key={agent.id}>
                 <div><strong>{agent.name}</strong><small>{agent.responsibility}</small></div>
                 <div className="agentRoute"><span>{agent.providerName}</span><code>{agent.model}</code><em>{agent.configured ? "configured" : "setup needed"}</em></div>
@@ -1799,13 +1799,17 @@ function SettingsPanel({ onClose, harnesses, billing, threadId }) {
             <div className="settingRow">
               <span>Account</span>
               <span className="settingValue">
-                {auth.authenticated ? (auth.email ?? auth.methodId ?? "yes") : "not signed in"}
-                {auth.authMode && ` · ${auth.authMode}`}
+                {auth.authenticated
+                  ? (auth.usingApiKey ? `XAI_API_KEY · ${auth.model || "grok-4.7"}` : (auth.email ?? auth.methodId ?? "yes"))
+                  : "not signed in"}
+                {auth.authMode && !auth.usingApiKey && ` · ${auth.authMode}`}
               </span>
             </div>
           ) : <div className="settingHint">Agent not connected yet.</div>}
           <div className="settingActions">
-            {auth?.authenticated ? (
+            {auth?.usingApiKey ? (
+              <div className="settingHint">Grok 4.7 is billed through your xAI API key. Browser sign-in is not required.</div>
+            ) : auth?.authenticated ? (
               <button className="agentBtn agentBtnQuiet" disabled={authBusy} onClick={logout}>Sign out</button>
             ) : (
               <button className="agentBtn agentBtnPrimary" disabled={authBusy} onClick={login}>
@@ -1927,8 +1931,14 @@ function SettingsPanel({ onClose, harnesses, billing, threadId }) {
         </section>
 
         <section className="settingSection">
-          <h4>Grok Build usage</h4>
-          {billing?.available ? (
+          <h4>Grok usage</h4>
+          {auth?.usingApiKey ? (
+            <div className="settingHint">
+              Token usage for <code>{auth.model || "grok-4.7"}</code> is billed on
+              your xAI API account at console.x.ai. PhoenixAI does not invent a
+              remaining-quota percentage for API keys.
+            </div>
+          ) : billing?.available ? (
             <>
               <div className="settingRow">
                 <span>Shared pool remaining</span>

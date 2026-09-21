@@ -34,3 +34,6 @@ Thumbs.db
 # strategy structure of the ATLAS trading system; the repo is public, so they
 # stay local. The file remains on disk — it is only untracked.
 prompts/
+
+# Phone screenshots and local planning notes. The repo is public.
+Grok Planning/

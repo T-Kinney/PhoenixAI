@@ -7,8 +7,10 @@ their own agent session, model choice, memory, checkpoints, and activity.
 
 ## Current capabilities
 
-- Grok Build sign-in, persistent ACP sessions, reasoning, tool streaming,
-  permission prompts, cancellation, and shared-usage remaining.
+- Grok 4.7 as the commander: an `XAI_API_KEY` in `.env` or Settings bills
+  `api.x.ai` (no grok.com sign-in required). Without a key, Grok Build's
+  SuperGrok session still works. Persistent ACP sessions, reasoning, tool
+  streaming, permission prompts, and cancellation are unchanged.
 - Dynamic model discovery for xAI, Qwen Model Studio, Kimi, DeepSeek, and other
   OpenAI-compatible providers, with catalog fallbacks when offline.
 - Independent `review_with_model` MCP tool for bounded, read-only diff review by
@@ -62,8 +64,9 @@ Copy-Item .env.example .env
 npm.cmd run dev
 ```
 
-Open `http://127.0.0.1:5173`. The local API listens only on loopback. Provider
-keys are optional; add only the providers you intend to use.
+Open `http://127.0.0.1:5173`. The local API listens only on loopback. Put your
+xAI key in `.env` as `XAI_API_KEY` to run Grok 4.7 on the API. Other provider
+keys are optional.
 
 For the desktop shell:
 

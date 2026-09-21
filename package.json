@@ -1,7 +1,7 @@
 {
   "name": "phoenixai",
-  "version": "0.2.0",
-  "description": "A secure multi-model desktop workspace led by Grok Build.",
+  "version": "0.2.1",
+  "description": "A secure multi-model desktop workspace led by Grok 4.7.",
   "author": "PhoenixAI contributors",
   "private": true,
   "type": "module",

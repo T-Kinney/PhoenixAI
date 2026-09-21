@@ -7,9 +7,11 @@ project. Agent tool calls remain subject to the selected approval posture. The
 built-in project terminal executes exactly the command entered by the user in
 the bound project folder; it is not a sandbox.
 
-Child processes receive a reduced operating-system environment. Paid-provider
-keys are withheld from review processes unless the user explicitly unlocks
-paid cloud calls with non-zero limits. OpenRouter is hard-blocked in this
+Child processes receive a reduced operating-system environment. The Grok Build
+daemon is the exception for `XAI_API_KEY` / `GROK_API_KEY`: when configured,
+those values are injected so Grok 4.7 can bill `api.x.ai`. Paid reviewer keys
+(Qwen, Kimi, DeepSeek) are withheld unless the user explicitly unlocks paid
+cloud calls with non-zero limits. OpenRouter is hard-blocked in this
 release: its credential is never passed to an agent or used for inference.
 Credentials entered in the packaged app are encrypted with Electron safe
 storage (Windows account protection); the renderer can set or clear a value but
